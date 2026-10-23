@@ -160,9 +160,53 @@ unset FM_SUPERVISION_ACTOR FM_BRANCH_REPORT_TURN FM_LEASE_HOLDER_PID PI_CODING_A
 # Homes are registered in a file: make_home runs in a command substitution,
 # whose variables never reach this shell.
 HOMES_FILE="$TMP_ROOT/homes"
+
+# Temporary tail diagnostic: inactive until the retained scenario76 checkpoint.
+_HOST_TAIL_DIAG_ACTIVE=0
+_host_tail_diag() {
+  local _diag_saved=$? _diag_event=$1 _diag_phase=$2 _diag_home=$3
+  local _diag_pid=${4:-unknown} _diag_rc=${5:-unknown} _diag_command=${6:-unknown}
+  [ "${_HOST_TAIL_DIAG_ACTIVE:-0}" = 1 ] || return "$_diag_saved"
+  local _diag_at=${EPOCHREALTIME:-} _diag_clock=epoch-wall-us
+  local _diag_identity=unknown _diag_identity_rc=unknown
+  if [ -z "$_diag_at" ]; then
+    _diag_clock=utc-wall-s
+    _diag_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || _diag_at=unknown
+  fi
+  case "$_diag_pid" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$_diag_pid" -gt 0 ]; then
+        if _diag_identity=$(fm_test_pid_identity "$_diag_pid" 2>/dev/null); then
+          _diag_identity_rc=0
+          [ -n "$_diag_identity" ] || _diag_identity=unknown
+        else
+          _diag_identity_rc=$?
+          _diag_identity=unknown
+        fi
+      fi
+      ;;
+  esac
+  printf 'FM_HOST_TAIL_DIAG event=%q phase=%q at=%q clock=%q run=%q attempt=%q job=%q job_id=unknown script=tests/fm-supervision-host.test.sh script_shell_pid=%s emitter_pid=%s home=%q expected_pid=%q expected_identity=unknown observed_identity=%q identity_rc=%q command=%q rc=%q\n' \
+    "$_diag_event" "$_diag_phase" "$_diag_at" "$_diag_clock" \
+    "${GITHUB_RUN_ID:-unknown}" "${GITHUB_RUN_ATTEMPT:-unknown}" "${GITHUB_JOB:-unknown}" \
+    "$$" "${BASHPID:-unknown}" "$_diag_home" "$_diag_pid" "$_diag_identity" "$_diag_identity_rc" "$_diag_command" "$_diag_rc" >&2 || :
+  return "$_diag_saved"
+}
+_host_tail_phase() {
+  local _phase_name=$1 _phase_home=$2 _phase_pid=$3
+  shift 3
+  _host_tail_diag begin "$_phase_name" "$_phase_home" "$_phase_pid" unknown "$*"
+  "$@"
+  local _phase_rc=$?
+  _host_tail_diag end "$_phase_name" "$_phase_home" "$_phase_pid" "$_phase_rc" "$*"
+  return "$_phase_rc"
+}
+
 # Stop whatever a case left running, by the exact pids its home recorded.
 stop_home_processes() {  # <home>
-  local home=$1 pid arms='' i=0
+  local home=$1 pid arms='' i=0 wait_rc
+  _host_tail_diag begin cleanup.home "$home" unknown unknown stop_home_processes
   if [ -f "$home/state/.supervision-host" ]; then
     arms=$(awk -F '\t' '$1 == "arm" { print $2 }' "$home/state/.supervision-host")
     pid=$(awk -F '\t' '$1 == "host" { print $2; exit }' "$home/state/.supervision-host")
@@ -179,7 +223,10 @@ stop_home_processes() {  # <home>
   [ -z "$pid" ] || kill -TERM "$pid" 2>/dev/null || true
   while IFS= read -r pid; do
     if [ -e "$home/session.stop" ]; then
-      wait "$pid" 2>/dev/null || true
+      _host_tail_diag begin cleanup.wait "$home" "$pid" unknown "wait $pid (registered fake-Claude child)"
+      wait_rc=0
+      wait "$pid" 2>/dev/null || { wait_rc=$?; true; }
+      _host_tail_diag end cleanup.wait "$home" "$pid" "$wait_rc" "wait $pid (registered fake-Claude child)"
     else
       kill -TERM "$pid" 2>/dev/null || true
     fi
@@ -187,13 +234,18 @@ stop_home_processes() {  # <home>
   while IFS= read -r pid; do
     kill -TERM "$pid" 2>/dev/null || true
   done < <(cat "$home/orphan-pid" 2>/dev/null)
+  _host_tail_diag end cleanup.home "$home" unknown "$?" stop_home_processes
 }
 suite_cleanup() {
-  local home
+  local home cleanup_status=$?
+  _host_tail_diag begin suite.cleanup unknown unknown "$cleanup_status" suite_cleanup
   while IFS= read -r home; do
     [ -n "$home" ] && stop_home_processes "$home"
   done < <(cat "$HOMES_FILE" 2>/dev/null)
+  _host_tail_diag begin cleanup.shared unknown unknown unknown fm_test_cleanup
   fm_test_cleanup
+  _host_tail_diag end cleanup.shared unknown unknown "$?" fm_test_cleanup
+  _host_tail_diag end suite.cleanup unknown unknown "$?" suite_cleanup
 }
 trap suite_cleanup EXIT
 
@@ -3031,12 +3083,16 @@ test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
 }
 
 test_unverified_engine_hands_every_away_wake_to_main() {
-  local home
-  home=$(make_home no-engine away 'pi')
+  local home owner_pid start_rc
+  home=$(_host_tail_phase no-engine.make-home unknown unknown make_home no-engine away 'pi')
+  _host_tail_diag begin no-engine.start-host "$home" unknown unknown start_host
   start_host "$home"
-  wait_until 150 watcher_live "$home" || fail "no engine: the host never started a watcher cycle"
-  append_status "$home" 'anything'
-  wait_until 200 host_exited "$home" || fail "no engine: the wake did not reach main"
+  start_rc=$? owner_pid=$!
+  _host_tail_diag end no-engine.start-host "$home" "$owner_pid" "$start_rc" "$FAKE_CLAUDE (start_host owner)"
+  _host_tail_phase no-engine.watcher-live "$home" unknown wait_until 150 watcher_live "$home" || fail "no engine: the host never started a watcher cycle"
+  _host_tail_diag observed no-engine.watcher "$home" "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" unknown watcher_live
+  _host_tail_phase no-engine.append-status "$home" unknown append_status "$home" 'anything'
+  _host_tail_phase no-engine.host-exited "$home" "$owner_pid" wait_until 200 host_exited "$home" || fail "no engine: the wake did not reach main"
   assert_re "^supervision-host: no supervision engine runs here: config/supervision-host names 'pi', which is not a verified supervision engine" \
     "$home/host.out" "an unverified engine must be named on the wake it hands to main"
   ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "no engine: an engine ran"
@@ -3173,6 +3229,7 @@ test_park_seconds_at_or_beyond_the_hook_registration_fall_back_to_the_default
 test_park_limit_lets_a_turn_outlive_the_boundary
 test_first_cycle_status_streams_and_owner_options_reach_it
 test_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
-test_unverified_engine_hands_every_away_wake_to_main
-test_host_outside_the_lock_owner_stands_down
-test_superseded_host_leaves_the_owner_untouched
+_HOST_TAIL_DIAG_ACTIVE=1
+_host_tail_phase tail.no-engine unknown unknown test_unverified_engine_hands_every_away_wake_to_main
+_host_tail_phase tail.non-owner unknown unknown test_host_outside_the_lock_owner_stands_down
+_host_tail_phase tail.superseded unknown unknown test_superseded_host_leaves_the_owner_untouched
