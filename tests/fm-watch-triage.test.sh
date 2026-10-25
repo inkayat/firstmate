@@ -6029,6 +6029,103 @@ SH
   pass "triage log capping handles wc byte counts with leading spaces"
 }
 
+# --- externally queued captain inbox delivery -------------------------------
+# Missing proactive inbox surfacing leaves a handling-successor watcher alive
+# even though the real note command has durably announced the message.
+inbox_note() {  # <home> <request-id>
+  local home=$1 request=$2
+  printf 'Firstpane delivery regression: %s\nselected context: example diff\n' "$request" \
+    | FM_HOME="$home" "$ROOT/bin/fm-inbox.sh" note --request-id "$request" --json - \
+    > "$home/$request.json" || return 1
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' < "$home/$request.json"
+}
+
+test_inbox_notes_surface_on_handling_successors() {
+  local posture timing dir state out id pid
+  for posture in normal away quiet; do
+    for timing in before running; do
+      dir=$(make_case "inbox-$posture-$timing"); state="$dir/state"; out="$dir/watch.out"
+      case "$posture" in
+        away) touch "$state/.afk" ;;
+        quiet) printf 'mode=quiet\n' > "$state/.afk" ;;
+      esac
+      if [ "$timing" = before ]; then
+        id=$(inbox_note "$dir" firstpane-note) || fail "inbox note failed"
+      fi
+      FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"; pid=$!
+      if [ "$timing" = running ]; then
+        wait_poll_cycle "$state" "$pid" || fail "empty successor did not reach its poll loop"
+        id=$(inbox_note "$dir" firstpane-note) || { reap "$pid"; fail "live inbox note failed"; }
+      fi
+      wait_for_exit "$pid" 100 || fail "$posture/$timing inbox note did not wake a handling successor"
+      grep '^check:' "$out" | grep -F "inbox:$id" >/dev/null \
+        || fail "$posture/$timing did not surface the inbox key as a check: $(cat "$out")"
+      FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" drain > "$dir/notes.out" \
+        || fail "surfacing lost the pending note"
+      grep -F 'selected context: example diff' "$dir/notes.out" >/dev/null \
+        || fail "surfacing consumed the saved context"
+    done
+  done
+  pass "real inbox notes wake handling successors before startup and during polling in normal, away and quiet postures"
+}
+
+test_inbox_duplicate_suppression_preserves_recovery_and_ack() {
+  local dir state out id duplicate pid
+  dir=$(make_case inbox-recovery); state="$dir/state"; out="$dir/first.out"
+  id=$(inbox_note "$dir" firstpane-retry) || fail "inbox note failed"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "first inbox delivery never surfaced"
+
+  duplicate=$(inbox_note "$dir" firstpane-retry) || fail "inbox retry failed"
+  [ "$duplicate" = "$id" ] || fail "request retry changed the note identity"
+  append_wake "$state" check "inbox:$id" "check: repeated inbox announcement"
+  out="$dir/duplicate.out"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "same inbox key woke the handling successor twice: $(cat "$out")"
+  [ ! -s "$out" ] || { reap "$pid"; fail "duplicate announcement printed a wake"; }
+  reap "$pid"
+
+  # No acknowledgement was issued. A recovery arm must still present the
+  # durable row, even though its proactive notification was already delivered.
+  out="$dir/recovery.out"
+  procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_for_exit "$pid" 100 || fail "unacknowledged inbox delivery was not recovered"
+  grep -F 'check: rearm-resurface' "$out" >/dev/null || fail "recovery path was replaced by duplicate delivery"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2> "$dir/drain.err" \
+    || fail "recovered inbox wake did not drain"
+  grep "$(printf '\tcheck\t')" "$dir/drain.out" | grep -F "inbox:$id" >/dev/null \
+    || fail "recovery lost the durable inbox row"
+  FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" drain > "$dir/pending.out" || fail "pending note did not drain"
+  grep -F 'selected context: example diff' "$dir/pending.out" >/dev/null \
+    || fail "queue presentation acknowledged the note prematurely"
+  FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" drain --ack "$id" >/dev/null || fail "note acknowledgement failed"
+  ack_drain_err "$state" "$dir/drain.err" || fail "generation-bound queue acknowledgement failed"
+  [ ! -s "$state/.wake-queue" ] || fail "acknowledged inbox rows remained queued"
+  FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" drain > "$dir/handled.out" || fail "handled-note drain failed"
+  ! grep -F 'selected context: example diff' "$dir/handled.out" >/dev/null \
+    || fail "acknowledged note remained pending"
+  out="$dir/handled-watch.out"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "handled inbox note woke the next successor"
+  reap "$pid"
+  pass "duplicate inbox announcements stay quiet while recovery, note acknowledgement and generation-bound queue acknowledgement remain independent"
+}
+
+test_external_check_surface_ignores_other_rows() {
+  local dir state out pid
+  dir=$(make_case inbox-negative-control); state="$dir/state"; out="$dir/watch.out"
+  append_wake "$state" check "unrelated:inbox" "check: unrelated owner"
+  append_wake "$state" signal "inbox:not-a-check" "signal: wrong kind"
+  FM_WATCH_HANDLING_SUCCESSOR=1 procevent_watch_bg "$dir" "$out"; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "unrelated or wrong-kind queue row woke a successor"
+  append_wake "$state" check "procevent:positive-control:1" "check: process-event positive control"
+  wait_for_exit "$pid" 100 || fail "existing process-event positive control stopped surfacing"
+  grep '^check:' "$out" | grep -F 'procevent:positive-control:1' >/dev/null \
+    || fail "positive control lost its actionable process-event reason"
+  ! grep -F 'inbox:not-a-check' "$out" >/dev/null || fail "wrong-kind inbox row was surfaced"
+  pass "proactive external-check delivery ignores unrelated keys and non-check inbox rows while process-event delivery still works"
+}
+
 # --- process-event delivery -------------------------------------------------
 # A durably captured process-event result publishes an ordinary `check` wake on
 # the durable queue. The watcher must deliver that queued wake proactively -
@@ -7089,6 +7186,9 @@ test_secondmate_home_supervision_churn_is_not_write_evidence
 test_timer_repair_drops_a_finished_write_deferral_chain
 test_terminal_first_sight_drops_a_finished_write_deferral_chain
 test_triage_log_size_cap_accepts_spaced_wc_counts
+test_inbox_notes_surface_on_handling_successors
+test_inbox_duplicate_suppression_preserves_recovery_and_ack
+test_external_check_surface_ignores_other_rows
 test_procevent_captured_result_surfaces_proactively
 test_procevent_unacknowledged_result_redrains_until_handled
 test_procevent_marker_keys_are_injective
