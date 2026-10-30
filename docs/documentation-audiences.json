@@ -441,6 +441,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pi-console-journal.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/pi-supervision-branch.md",
       "audience": "maintainer-architecture"
     },
