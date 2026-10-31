@@ -48,6 +48,8 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Manually initialize project agent-memory files (see the helper's header and help) |
 | `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json` |
+| `fm-console-signals.sh`  | Opt-in: publish this home's `fm-console-signals.v1` file (waiting state, live captain-hold questions, bots) for an external console; the watcher runs `write` each poll while `config/console-signals` exists |
+| `fm-console-signals.py`  | The assembly and atomic-write engine behind `fm-console-signals.sh` |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared session-lock ownership from harness ancestry, a trusted Claude session id, or on Windows/Git Bash a published harness pid, for fm-lock.sh and the Claude Stop auto-arm, plus the read-only lock inspection behind `fm-lock.sh status` and `fm-inbox.sh ready` |
