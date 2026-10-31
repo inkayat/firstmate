@@ -357,6 +357,59 @@ $allowed
 EOF
 }
 
+PENDING_NOTES_MAX=10
+
+note_age() {  # <seconds>
+  if [ "$1" -lt 60 ]; then printf '%ss' "$1"
+  elif [ "$1" -lt 3600 ]; then printf '%sm' "$(( $1 / 60 ))"
+  elif [ "$1" -lt 86400 ]; then printf '%sh' "$(( $1 / 3600 ))"
+  else printf '%sd' "$(( $1 / 86400 ))"
+  fi
+}
+
+# True when <rows> (presented drain rows) carry the wake of a still-pending
+# note, which is when this drain must list the inbox and when its
+# acknowledgement is refused until the note is handled.
+rows_carry_pending_note() {  # <rows>
+  local id
+  while IFS= read -r id; do
+    note_is_pending "$id" && return 0
+  done <<EOF
+$(printf '%s\n' "$1" | awk -F '\t' '$3 == "check" && $4 ~ /^inbox:/ { print substr($4, 7) }')
+EOF
+  return 1
+}
+
+# PENDING CAPTAIN NOTES: every note still pending in the inbox, oldest first,
+# at most PENDING_NOTES_MAX of them, each as "<id> (saved <age> ago): <first
+# line>" with the line cleaned and capped by note_first_line. Silent when no
+# note is pending.
+print_pending_notes_section() {
+  local LC_ALL=C note id now mtime shown=0 more=0
+  [ -d "$INBOX_DIR" ] || return 0
+  now=$(date +%s)
+  for note in "$INBOX_DIR"/*.note; do
+    id=${note##*/}
+    id=${id%.note}
+    note_is_pending "$id" || continue
+    if [ "$shown" -ge "$PENDING_NOTES_MAX" ]; then
+      more=$((more + 1))
+      continue
+    fi
+    if [ "$shown" -eq 0 ]; then
+      printf "PENDING CAPTAIN NOTES (still pending in the captain's inbox, oldest first; read each with bin/fm-inbox.sh list, answer it where an answer is owed with bin/fm-inbox.sh reply <id> '<answer>', then mark it handled with bin/fm-inbox.sh drain --ack <id>):\n" || return 1
+    fi
+    mtime=$(fm_path_mtime "$note") || mtime=$now
+    case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+    [ "$mtime" -le "$now" ] || mtime=$now
+    note_first_line "$id"
+    printf '%s (saved %s ago): %s\n' "$id" "$(note_age $((now - mtime)))" "$NOTE_LINE" || return 1
+    shown=$((shown + 1))
+  done
+  [ "$more" -eq 0 ] \
+    || printf 'PENDING CAPTAIN NOTES: %s more pending note(s) not shown; bin/fm-inbox.sh list shows every one\n' "$more"
+}
+
 case "${1:-}" in
   '') ;;
   --ack-through)
@@ -1235,8 +1288,13 @@ case "$RECOVERY_MARKER_TOKEN" in
 esac
 fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
-printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
-  "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
+PENDING_NOTE_ACK_HINT=
+if rows_carry_pending_note "$RAW_ROWS"; then
+  print_pending_notes_section || true
+  PENDING_NOTE_ACK_HINT=", and after every note under PENDING CAPTAIN NOTES is answered where owed and marked handled with bin/fm-inbox.sh drain --ack <id> (this acknowledgement is refused while one is still pending),"
+fi
+printf 'WAKE_ACK_REQUIRED: after handling completes%s run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
+  "$PENDING_NOTE_ACK_HINT" "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
 print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1

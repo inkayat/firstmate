@@ -2,12 +2,12 @@
 # tests/fm-wake-drain-inbox-notes.test.sh - a captain inbox note's wake can
 # never be acknowledged unseen while the note is still pending.
 #
-# Pins consumer-visible properties of bin/fm-wake-drain.sh over synthetic homes
-# built with the real bin/fm-inbox.sh: an --ack-through whose range holds the
-# `check inbox:<id>` wake of a still-pending note is refused with nothing
-# consumed, a note that is gone or handled never blocks, the override takes
-# exact ids and is logged, and a home with no pending note sees the drain
-# exactly as before.
+# Pins three consumer-visible properties of bin/fm-wake-drain.sh over synthetic
+# homes built with the real bin/fm-inbox.sh: an --ack-through whose range holds
+# the `check inbox:<id>` wake of a still-pending note is refused with nothing
+# consumed; a drain that carries such a wake lists every pending note in a
+# bounded PENDING CAPTAIN NOTES block; and a home with no pending note sees
+# the drain exactly as before.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -182,6 +182,65 @@ test_override_names_exact_ids_and_is_logged() {
   pass "the override takes exact note ids, refuses blanket or malformed lists, and logs one line per note"
 }
 
+test_pending_block_lists_every_note_with_bounded_clean_text() {
+  local a b c huge line bytes id i out err
+  new_home pending-block
+  a=$(queue_note $'first line of note A\nsecond line SECRET-A')
+  b=$(queue_note "note B")
+  huge=$(printf 'H%.0s' $(seq 1 20000))
+  c=$(queue_note "$(printf '\033[31mRED\033[0m \342\200\256evil\342\200\254 \302\233c1 \342\201\246iso\342\201\251 tab\there %s' "$huge")")
+  drain_to_files >/dev/null
+  out=$(cat "$HOME_DIR/drain.out")
+  err=$(cat "$HOME_DIR/drain.err")
+  assert_contains "$out" "PENDING CAPTAIN NOTES" "a drain carrying note wakes printed no PENDING block"
+  for id in "$a" "$b" "$c"; do
+    line=$(grep -a "^$id " "$HOME_DIR/drain.out") || fail "the PENDING block does not list $id: $out"
+    case "$line" in *"saved "[0-9]*[smhd]" ago"*) ;; *) fail "the PENDING line for $id has no age: $line" ;; esac
+  done
+  line=$(grep -a "^$a " "$HOME_DIR/drain.out")
+  assert_contains "$line" "first line of note A" "the PENDING block lost a note's first line"
+  assert_not_contains "$line" "SECRET-A" "the PENDING block printed past a note's first line"
+  line=$(grep -a "^$c " "$HOME_DIR/drain.out")
+  bytes=$(printf '%s' "$line" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -le 220 ] || fail "a huge note produced a $bytes-byte PENDING line"
+  assert_contains "$line" "RED" "the cleaned PENDING line lost visible text"
+  for i in $'\033' $'\342\200\256' $'\342\200\254' $'\342\201\246' $'\342\201\251' $'\302\233' $'\t'; do
+    case "$line" in *"$i"*) fail "the PENDING line kept a control or bidi byte sequence: $(printf '%s' "$line" | od -c | head -5)" ;; esac
+  done
+  # The block follows the wake lines, so the note sits in the same output.
+  [ "$(grep -an 'PENDING CAPTAIN NOTES' "$HOME_DIR/drain.out" | head -1 | cut -d: -f1)" \
+    -gt "$(grep -an "inbox:$c" "$HOME_DIR/drain.out" | head -1 | cut -d: -f1)" ] \
+    || fail "the PENDING block is not after the wake lines: $out"
+  case "$err" in
+    *"WAKE_ACK_REQUIRED:"*"PENDING CAPTAIN NOTES"*"--ack-through "*) ;;
+    *) fail "the WAKE_ACK_REQUIRED line does not mention the pending-note guard: $err" ;;
+  esac
+  ack_drain_err "$HOME_DIR/state" "$HOME_DIR/drain.err" 2>/dev/null \
+    && fail "the shared acknowledgement parser bypassed the guard"
+  pass "the PENDING block lists every pending note after the wake lines, bounded and stripped of control and bidi text"
+}
+
+test_pending_block_with_nul_bytes_and_note_count_cap() {
+  local i id out shown
+  new_home pending-cap
+  mkdir -p "$HOME_DIR/state/inbox"
+  for i in $(seq 10 23); do
+    id="17000000$i-fixture$i"
+    printf 'id=%s\nat=2026-10-31T00:00:00Z\nsource=text\nannounce_marker=1\n--\nbody\000with nul %s\n' "$id" "$i" \
+      > "$HOME_DIR/state/inbox/$id.note"
+    append_wake "$HOME_DIR/state" check "inbox:$id" "check: captain inbox note $id - fixture" \
+      || fail "setup: queueing fixture note $id failed"
+  done
+  drain_to_files >/dev/null
+  out=$(cat "$HOME_DIR/drain.out")
+  if grep -aq 'ignored null byte' "$HOME_DIR/drain.err"; then fail "a NUL byte in a note leaked a shell warning"; fi
+  shown=$(grep -ac '^17000000[0-9]*-fixture' "$HOME_DIR/drain.out")
+  [ "$shown" -le 10 ] || fail "the PENDING block listed $shown notes past its cap"
+  assert_contains "$out" "bodywith nul" "a NUL byte broke the note's first line"
+  assert_contains "$out" "more pending" "the PENDING block hid notes without saying how many"
+  pass "the PENDING block caps its note count, names the rest, and survives NUL bytes"
+}
+
 test_no_pending_note_leaves_drain_output_unchanged() {
   local seq gen ack
   new_home no-notes
@@ -220,5 +279,7 @@ test_ack_refused_while_note_pending_then_accepted_after_handling
 test_vanished_unreadable_or_otherwise_handled_notes_do_not_block
 test_malformed_inbox_key_does_not_block
 test_override_names_exact_ids_and_is_logged
+test_pending_block_lists_every_note_with_bounded_clean_text
+test_pending_block_with_nul_bytes_and_note_count_cap
 test_no_pending_note_leaves_drain_output_unchanged
 test_range_without_note_wakes_acknowledges_as_before
