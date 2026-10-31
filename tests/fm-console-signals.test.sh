@@ -519,7 +519,8 @@ test_hostile_ledger_text() {
   home=$(make_home ledger-hostile)
   hold_lock "$home"; pid=$LOCK_PID
   f="$home/state/console-signals.json"
-  text=$'Pick \e[31mred\e[0m\x01 or\r\nblue\e]0;t\a?\u202e'"$(printf 'ğ€%.0s' $(seq 1 1000))"
+  # U+202E (right-to-left override) as raw UTF-8, so the case holds in any locale.
+  text=$'Pick \e[31mred\e[0m\x01 or\r\nblue\e]0;t\a?\xe2\x80\xae'"$(printf 'ğ€%.0s' $(seq 1 1000))"
   run_pending "$home" add --kind question --task odd.task-1 -- "$text" >/dev/null || fail "hostile add failed"
   run_signals "$home" "" write 2>/dev/null || fail "write failed on hostile ledger text"
   check "$f" "$home" "$pid" "hostile ledger file"
