@@ -6,15 +6,19 @@
 // schemas, projection and privacy rules, bounds, generations, and reader rules.
 // This header owns how the extension keeps that contract (stated once here).
 //
-// Ownership. Only the Pi process that owns this home's session lock journals,
-// by the same ancestry read as fm-primary-pi-watch.ts lockOwnership(). A
-// process whose ancestry contains the live primary recorded in current.json is
-// a Pi session started inside that primary and stays inert. A fresh primary
-// takes the lock during its first run, so ownership is checked at session
-// start and at every run boundary until it holds, and rechecked whenever a run
-// settles. A non-owner only reads state/.lock (walking its ancestry with `ps`
-// only when the lock content changed) and never creates, writes, or deletes
-// anything. The factory registers event handlers and nothing else.
+// Ownership. Only the Pi process whose own session owns this home's session
+// lock journals. bin/fm-session-lock-lib.sh's fm_session_lock_owned_by_self is
+// the single owner of that answer, the same one bin/fm-lock.sh records against:
+// the lock's pid must be in this process's contiguous verified-harness
+// ancestry, and that walk stops at the first harness it meets. A Pi started
+// inside the primary therefore meets itself and never the primary above it,
+// whether or not the primary has published anything, and an ancestry the
+// library cannot resolve is not ownership. A fresh primary takes the lock
+// during its first run, so ownership is checked at session start and at every
+// run boundary until it holds, and rechecked whenever a run settles. A
+// non-owner only reads state/.lock (asking the library again only when the
+// lock content changed) and never creates, writes, or deletes anything. The
+// factory registers event handlers and nothing else.
 //
 // Read-only toward Pi. It reads event payloads and SessionManager getters and
 // never sends messages, appends entries, or registers tools, commands, or bus
@@ -57,7 +61,6 @@ const GENERATION_TAIL_BYTES = 1024;
 const QUEUE_MAX_BYTES = 1024 * 1024;
 const WRITER_OPS_MAX = 64;
 const RUNNING_TOOLS_MAX = 64;
-const LOCK_ANCESTRY_DEPTH = 8;
 const CURRENT_READ_MAX_BYTES = 64 * 1024;
 const SHUTDOWN_WAIT_MS = 250;
 const GENERATION_NAME = /^[0-9a-f]{32}$/;
@@ -66,7 +69,9 @@ const SESSION_REASONS = ["startup", "reload", "new", "resume", "fork"] as const;
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(extensionDir, "../..");
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
+const lockLibrary = `${fmRoot}/bin/fm-session-lock-lib.sh`;
 const lockPath = `${state}/.lock`;
 const journalDir = `${state}/extensions/pi-console-bridge`;
 const currentPath = `${journalDir}/current.json`;
@@ -74,7 +79,6 @@ const currentPath = `${journalDir}/current.json`;
 type StartReason = (typeof SESSION_REASONS)[number] | "activate" | "tree" | "rotate" | "resync" | "recover";
 type PublishMode = "takeover" | "continue";
 type GenerationState = "pending" | "open" | "lost" | "failed" | "closed";
-type Verdict = "owned" | "missing" | "other" | "nested";
 type UserRole = { role: "captain" } | { role: "operational"; opKind: string } | { role: "withheld" };
 type Fitted = { text: string; bytes: number; truncated: boolean };
 type QueueItem =
@@ -335,12 +339,6 @@ function candidateOf(entry: unknown): Candidate | null {
 
 // ---- Lock ownership -----------------------------------------------------
 
-async function parentPid(pid: string): Promise<string> {
-  const result = await runCommandAsync("ps", ["-o", "ppid=", "-p", pid]);
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
-
 function pidAlive(pid: string): boolean {
   try {
     process.kill(Number(pid), 0);
@@ -379,62 +377,53 @@ export default function (pi: ExtensionAPI): void {
   // Ownership answers keyed by the exact lock content they were computed for.
   let ownedLock = "";
   let negativeLock = "";
-  let negativeVerdict: Verdict = "other";
 
   const isLive = (ep: Epoch): boolean => current === ep && !ep.stopped;
 
-  // Same ownership read as fm-primary-pi-watch.ts lockOwnership(): the lock
-  // names the harness pid, and this process owns it when that pid appears in
-  // its own ancestry. Passing the primary recorded in current.json first means
-  // this process runs inside that primary.
-  async function checkOwnership(): Promise<{ verdict: Verdict; lockPid: string }> {
+  // The header's ownership rule. A positive answer is reused while the lock
+  // content stays the same and its holder is alive; a negative one is reused
+  // for the same lock content unless the lock names this process, whose answer
+  // is asked again at the next boundary.
+  async function checkOwnership(): Promise<{ owned: boolean; lockPid: string }> {
     let lockPid = "";
     try {
       lockPid = (await readFile(lockPath, "utf8")).trim();
     } catch {
-      return { verdict: "missing", lockPid: "" };
+      return { owned: false, lockPid: "" };
     }
     const holder = lockHolderPid(lockPid);
-    if (!holder) return { verdict: "other", lockPid };
-    if (ownedLock === lockPid && pidAlive(holder)) return { verdict: "owned", lockPid };
-    if (negativeLock === lockPid) return { verdict: negativeVerdict, lockPid };
-    const recorded = await readCurrentRecord();
-    const primary = recorded && Number.isInteger(recorded.piPid) ? String(recorded.piPid) : "";
-    const self = String(process.pid);
-    let pid = self;
-    for (let i = 0; i < LOCK_ANCESTRY_DEPTH; i += 1) {
-      if (pid !== self && pid === primary && pidAlive(pid)) {
-        negativeLock = lockPid;
-        negativeVerdict = "nested";
-        return { verdict: "nested", lockPid };
-      }
-      if (pid === holder) {
-        ownedLock = lockPid;
-        negativeLock = "";
-        return { verdict: "owned", lockPid };
-      }
-      pid = await parentPid(pid);
-      if (!pid || pid === "1") break;
+    if (!holder) return { owned: false, lockPid };
+    if (ownedLock === lockPid && pidAlive(holder)) return { owned: true, lockPid };
+    if (negativeLock === lockPid) return { owned: false, lockPid };
+    const answer = await runCommandAsync("bash", [
+      "-c",
+      '. "$1" && fm_session_lock_owned_by_self "$2"',
+      "fm-console-bridge",
+      lockLibrary,
+      state,
+    ]);
+    if (answer.status === 0) {
+      ownedLock = lockPid;
+      negativeLock = "";
+      return { owned: true, lockPid };
     }
-    if (!pidAlive(holder)) return { verdict: "missing", lockPid };
-    negativeLock = lockPid;
-    negativeVerdict = "other";
-    return { verdict: "other", lockPid };
+    if (holder !== String(process.pid)) negativeLock = lockPid;
+    return { owned: false, lockPid };
   }
 
   async function verifyOwnership(ep: Epoch, trigger: "session" | "run"): Promise<void> {
     if (ep.checking) return;
     ep.checking = true;
-    let result: { verdict: Verdict; lockPid: string };
+    let result: { owned: boolean; lockPid: string };
     try {
       result = await checkOwnership();
     } catch {
-      result = { verdict: "missing", lockPid: "" };
+      result = { owned: false, lockPid: "" };
     } finally {
       ep.checking = false;
     }
     if (!isLive(ep)) return;
-    if (result.verdict === "owned") {
+    if (result.owned) {
       ep.lockPid = result.lockPid;
       if (!ep.generation) requestOpen(ep, trigger === "session" ? ep.sessionReason : "activate", "takeover");
       else if (ep.needsRecovery) requestOpen(ep, "recover", "takeover");

@@ -5,7 +5,9 @@
 # sending, tool, command, and event-bus surfaces refuse every call, and drives
 # it with synthetic session managers and event payloads shaped like the ones
 # Pi 1.4.0's agent loop emits (extension handlers run before a finished
-# message joins the session). docs/pi-console-journal.md owns the contract.
+# message joins the session). Ownership is answered by bin/fm-session-lock-lib.sh,
+# so every case runs Node under a Pi harness name (see PI_NODE below).
+# docs/pi-console-journal.md owns the contract.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -334,12 +336,22 @@ JS
 
 DRIVER_URL="file://$DRIVER"
 
+# Every case runs Node under the name `pi`, so the session-lock library sees
+# the extension host as a Pi harness process, as a real primary is; the kernel
+# records a symlink's own name as the process identity (fm_agent_standin in
+# tests/lib.sh). The runner's own harness session identity is cleared so it
+# cannot answer for these processes.
+PI_NODE="$TMP_ROOT/harness-bin/pi"
+mkdir -p "${PI_NODE%/*}"
+ln -s "$(command -v node)" "$PI_NODE"
+
 run_node() {  # <home> [ENV=value...] ; script on stdin
   local home=$1
   shift
   env -u FM_STATE_OVERRIDE -u FM_ROOT_OVERRIDE -u FM_OPERATIONAL_INPUT_SCRIPT \
-    FM_HOME="$home" BRIDGE="$BRIDGE" DRIVER_URL="$DRIVER_URL" "$@" \
-    node --input-type=module
+    -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$home" BRIDGE="$BRIDGE" DRIVER_URL="$DRIVER_URL" PI_NODE="$PI_NODE" "$@" \
+    "$PI_NODE" --input-type=module
 }
 
 test_sessions_that_do_not_own_the_lock_write_nothing() {
@@ -408,6 +420,79 @@ JS
     [ "$out" = ok ] || fail "non-owner $scenario printed unexpected output: $out"
   done
   pass "Pi console journal: import alone, a missing lock, a foreign live holder, and a Pi nested inside the primary all write nothing"
+}
+
+test_a_pi_started_inside_the_primary_never_claims_the_journal() {
+  local home="$TMP_ROOT/nested-first" out
+  mkdir -p "$home"
+  out=$(run_node "$home" 2>&1 <<'JS'
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+const t = await import(process.env.DRIVER_URL);
+const home = process.env.FM_HOME;
+// This process is the primary: the lock names it, as bin/fm-lock.sh records
+// the innermost Pi harness of the session that started Firstmate.
+t.prepareHome(home);
+
+// A Pi session started from a shell inside the primary, loading the same
+// extension against the same home, as a tool-run `pi -p` would.
+const nested = `
+const t = await import(process.env.DRIVER_URL);
+const bridge = await t.loadBridge();
+const session = t.createSession({ file: "/sessions/nested-conversation.jsonl", id: "nested" });
+session.appendMessage(t.userMessage("NESTED_PRIVATE_TEXT"));
+const ctx = t.contextFor(session);
+await bridge.emit("session_start", { reason: "startup" }, ctx);
+await t.sleep(500);
+await bridge.emit("agent_start", {}, ctx);
+await t.sleep(200);
+await t.userTurn(bridge, session, ctx, "NESTED_PROMPT");
+await t.assistantTurn(bridge, session, ctx, [{ type: "text", text: "NESTED_ANSWER" }]);
+await bridge.emit("agent_settled", { aborted: false }, ctx);
+await t.sleep(500);
+await bridge.emit("session_shutdown", { reason: "quit" }, ctx);
+t.assertClean(bridge, "nested");
+console.log("nested-ran");
+`;
+const runNested = () => new Promise((resolve) => {
+  const child = spawn("bash", ["-c", '"$PI_NODE" --input-type=module'], { stdio: ["pipe", "pipe", "pipe"] });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { output += chunk; });
+  child.on("close", (code) => resolve({ code, output: output.trim() }));
+  child.stdin.end(nested);
+});
+
+// Nested first: the primary has published nothing yet.
+const first = await runNested();
+t.assert(first.code === 0 && first.output === "nested-ran", `nested session did not run cleanly: ${first.output}`);
+t.assert(!existsSync(`${home}/state/extensions`), "a Pi started inside the primary created the journal before the primary published");
+
+// The genuine owner still activates afterwards.
+const bridge = await t.loadBridge();
+const session = t.createSession({ file: "/sessions/main-conversation.jsonl", id: "main" });
+const ctx = t.contextFor(session);
+await bridge.emit("session_start", { reason: "startup" }, ctx);
+const published = await t.waitFor(() => {
+  const current = t.readCurrent(home);
+  return current.state === "live" ? current : null;
+}, "the primary's own publication");
+t.assert(published.piPid === process.pid && published.conversation === "main-conversation.jsonl", `the journal belongs to ${published.piPid} ${published.conversation}`);
+
+// Primary first: a nested session started now changes nothing either.
+const before = readFileSync(`${t.journalDir(home)}/current.json`, "utf8");
+const names = t.journalNames(home).join(",");
+const second = await runNested();
+t.assert(second.code === 0 && second.output === "nested-ran", `nested session did not run cleanly: ${second.output}`);
+t.assert(readFileSync(`${t.journalDir(home)}/current.json`, "utf8") === before, "a nested session rewrote the primary's current.json");
+t.assert(t.journalNames(home).join(",") === names, "a nested session added files beside the primary's journal");
+t.assert(!t.allBytes(home).includes("NESTED_"), "nested conversation text reached the primary's journal");
+t.assertClean(bridge, "primary");
+console.log("ok");
+JS
+  ) || fail "nested-first: $out"
+  [ "$out" = ok ] || fail "nested-first printed unexpected output: $out"
+  pass "Pi console journal: a Pi started inside the primary writes nothing whether or not the primary has published, and the primary still activates"
 }
 
 test_lock_owner_publishes_snapshot_then_ordered_live_events() {
@@ -998,6 +1083,7 @@ JS
 }
 
 test_sessions_that_do_not_own_the_lock_write_nothing
+test_a_pi_started_inside_the_primary_never_claims_the_journal
 test_lock_owner_publishes_snapshot_then_ordered_live_events
 test_partial_text_reaches_disk_before_the_message_ends
 test_private_content_never_reaches_disk

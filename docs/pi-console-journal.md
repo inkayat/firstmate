@@ -14,10 +14,10 @@ This page owns the published contract (`fm-console-journal.v1`); the extension's
 
 ## Who writes
 
-- Only the Pi process whose ancestry holds the home's session lock writes, by the same ancestry rule as the watcher extension.
-- A Pi session started inside that primary, recognised by the live primary recorded in `current.json` appearing in its ancestry, writes nothing; before the primary has published once, such a session cannot be told apart from it.
+- Only the Pi process whose own session owns the home's session lock writes: `fm_session_lock_owned_by_self` in [`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh) decides, so the journal's owner is exactly the session `bin/fm-lock.sh` recorded.
+- That rule looks for the lock's pid only in the process's own contiguous run of harness processes, which for Pi is the Pi process itself, so a Pi started inside the primary (for example from one of its shell commands) writes nothing, whether or not the primary has published yet, and an ancestry the library cannot resolve is treated as not owning.
 - A fresh primary takes the session lock during its first run, so its journal can open at the first run boundary instead of at session start.
-- Every other process that loads the extension, such as a Pi worker or an ad hoc Pi in the home, reads `state/.lock` (and, when the lock's content changed, `current.json` and its own process ancestry) and never creates, writes, or deletes anything.
+- Every other process that loads the extension, such as a Pi worker or an ad hoc Pi in the home, reads `state/.lock` (and asks the library again only when the lock's content changed) and never creates, writes, or deletes anything.
 - The extension registers only event handlers: no tool, command, event-bus channel, sent message, or session entry.
 
 ## Location and access

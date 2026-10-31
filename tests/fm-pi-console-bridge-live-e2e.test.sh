@@ -30,6 +30,7 @@ PROJECT="$TMP_ROOT/project"
 FMHOME="$TMP_ROOT/fmhome"
 JOURNAL_DIR="$FMHOME/state/extensions/pi-console-bridge"
 CHECK="$TMP_ROOT/check.mjs"
+NESTED_DIR="$TMP_ROOT/nested"
 export NODE_NO_WARNINGS=1
 # The private tmux server's socket lives under this case's own temp root, so
 # removing the root removes it too.
@@ -37,7 +38,7 @@ export TMUX_TMPDIR="$TMP_ROOT/tmux"
 
 mkdir -p "$PROJECT/.pi/extensions/lib" "$PROJECT/bin" "$FMHOME/state" "$TMP_ROOT/agent" \
   "$TMP_ROOT/sessions" "$TMP_ROOT/home" "$TMP_ROOT/xdg/config" "$TMP_ROOT/xdg/data" \
-  "$TMP_ROOT/xdg/state" "$TMP_ROOT/xdg/cache" "$TMUX_TMPDIR/tmux-$(id -u)"
+  "$TMP_ROOT/xdg/state" "$TMP_ROOT/xdg/cache" "$TMUX_TMPDIR/tmux-$(id -u)" "$NESTED_DIR"
 chmod 700 "$TMUX_TMPDIR/tmux-$(id -u)"
 
 cleanup() {
@@ -57,16 +58,52 @@ live_fail() {
 fm_git_init_commit "$PROJECT"
 cp "$ROOT/.pi/extensions/fm-console-bridge.ts" "$PROJECT/.pi/extensions/"
 cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/"
-cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/"
+cp "$ROOT/bin/fm-operational-input.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$PROJECT/bin/"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
 
 cat >"$PROJECT/journal-probe.ts" <<'TS'
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
 import { createFauxCore, fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { encodeFirstmateOperationalInput } from "./.pi/extensions/lib/fm-operational-input.ts";
 
+// A nested Pi records that its session started and its own ancestry, so the
+// guard can prove it ran with the journal extension loaded.
+function recordNestedStart(mark: string): void {
+  const chain: string[] = [];
+  let pid = String(process.pid);
+  for (let i = 0; i < 4 && pid && pid !== "1"; i += 1) {
+    chain.push(execFileSync("ps", ["-o", "pid=,ppid=,comm=", "-p", pid], { encoding: "utf8" }).trim().replace(/\s+/g, " "));
+    pid = execFileSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" }).trim();
+  }
+  writeFileSync(mark, `${JSON.stringify({ pid: process.pid, chain })}\n`);
+}
+
+// Run one Pi from a shell inside this one, loading the journal extension
+// against the same home, for as long as its stdin stays open.
+async function runNestedPi(step: string): Promise<void> {
+  const dir = process.env.NESTED_DIR as string;
+  const child = spawn("bash", ["-c", "sleep 3 | pi --mode rpc --offline --approve --no-context-files --no-skills --no-prompt-templates --no-themes --no-extensions -e ./.pi/extensions/fm-console-bridge.ts -e ./journal-probe.ts --no-session >/dev/null 2>&1"], {
+    cwd: process.cwd(),
+    env: { ...process.env, NESTED_MARK: `${dir}/mark-${step}.json` },
+    stdio: "ignore",
+    detached: true,
+  });
+  const timer = setTimeout(() => {
+    if (child.pid) process.kill(-child.pid, "SIGTERM");
+  }, 15000);
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  clearTimeout(timer);
+  writeFileSync(`${dir}/result-${step}`, `${code}\n`);
+}
+
 export default function (pi: ExtensionAPI): void {
+  pi.on("session_start", () => {
+    if (process.env.NESTED_MARK) recordNestedStart(process.env.NESTED_MARK);
+  });
+
   const faux = createFauxCore({
     api: "console-journal-e2e-api",
     provider: "console-journal-e2e",
@@ -100,9 +137,17 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("journal-e2e", {
     description: "Drive one deterministic console journal run.",
     handler: async (args, ctx) => {
+      const [step, round = ""] = args.trim().split(/\s+/);
+      if (step === "nested") {
+        // The lock names this Pi engine, as bin/fm-lock.sh records the
+        // innermost Pi harness of the session that ran fm-session-start.
+        const lock = `${process.env.FM_HOME}/state/.lock`;
+        if (!existsSync(lock)) writeFileSync(lock, `${process.pid}\n`);
+        await runNestedPi(round);
+        return;
+      }
       const model = ctx.modelRegistry.find("console-journal-e2e", "deterministic");
       if (!model || !(await pi.setModel(model))) throw new Error("console journal model unavailable");
-      const step = args.trim();
       if (step === "first") {
         faux.setResponses([
           fauxAssistantMessage([
@@ -129,7 +174,6 @@ TS
 # has not arrived yet, and 1 with a message when it arrived wrong.
 cat >"$CHECK" <<'JS'
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 const [dir, phase, previousGen] = process.argv.slice(2);
 const notYet = () => process.exit(2);
 const wrong = (message) => {
@@ -157,13 +201,14 @@ const everything = () => readdirSync(dir).map((name) => readFileSync(`${dir}/${n
 const settledRuns = (records) => records.filter((r) => r.type === "run" && r.state === "settled").length;
 const leaked = () => everything().match(/[A-Z_]+_SECRET/g);
 
-if (phase === "startup") {
+if (phase === "published") {
   if (current.state !== "live") notYet();
   assert(current.schema === "fm-console-journal.v1" && current.capabilities?.submit === false && current.capabilities?.journal === true, `wrong contract header ${JSON.stringify(current)}`);
-  assert(current.startedReason === "startup", `activation reason ${current.startedReason}`);
+  // The lock appeared after this session started, so the first publication is
+  // the runtime the reload created.
+  assert(current.startedReason === "reload" && current.previousGen === null, `first publication ${JSON.stringify(current)}`);
   assert(typeof current.conversation === "string" && current.conversation.endsWith(".jsonl") && !current.conversation.includes("/"), "conversation is not a base name");
-  const parent = execFileSync("ps", ["-o", "ppid=", "-p", String(current.piPid)], { encoding: "utf8" }).trim();
-  assert(parent === current.lockPid, `piPid ${current.piPid} is not the child of the lock holder ${current.lockPid}`);
+  assert(current.lockPid === String(current.piPid), `the journal's writer ${current.piPid} is not the lock holder ${current.lockPid}`);
   const records = journal(current.gen);
   assert(records[0].type === "snapshot" && records[0].busy === false && records[0].items.length === 0, "a new session did not open with an empty idle snapshot");
   assert((statSync(dir).mode & 0o777) === 0o700, "journal directory is not 0700");
@@ -264,27 +309,59 @@ type_line() {
   tmux -L "$SOCKET" send-keys -t "$SESSION" Enter
 }
 
-PANE_CMD=$(printf 'env -i PATH=%q TERM=xterm-256color LANG=C.UTF-8 HOME=%q XDG_CONFIG_HOME=%q XDG_DATA_HOME=%q XDG_STATE_HOME=%q XDG_CACHE_HOME=%q PI_CODING_AGENT_DIR=%q FM_HOME=%q PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 bash --noprofile --norc -c %q' \
+# One Pi run from a shell inside the primary (see runNestedPi in the probe):
+# waits for it to exit and proves it reached session_start with the journal
+# extension loaded, so a quiet journal is evidence rather than a no-op.
+nested_round() {  # <round>
+  local round=$1 i=0
+  type_line "/journal-e2e nested $round"
+  until [ -s "$NESTED_DIR/result-$round" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 300 ] || live_fail "nested Pi round $round did not finish"
+    sleep 0.1
+  done
+  [ -s "$NESTED_DIR/mark-$round.json" ] || live_fail "nested Pi round $round never reached session_start"
+}
+
+PANE_CMD=$(printf 'env -i PATH=%q TERM=xterm-256color LANG=C.UTF-8 HOME=%q XDG_CONFIG_HOME=%q XDG_DATA_HOME=%q XDG_STATE_HOME=%q XDG_CACHE_HOME=%q PI_CODING_AGENT_DIR=%q FM_HOME=%q NESTED_DIR=%q PI_OFFLINE=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 bash --noprofile --norc -c %q' \
   "$PATH" "$TMP_ROOT/home" "$TMP_ROOT/xdg/config" "$TMP_ROOT/xdg/data" "$TMP_ROOT/xdg/state" "$TMP_ROOT/xdg/cache" \
-  "$TMP_ROOT/agent" "$FMHOME" \
-  "printf '%s\n' \"\$\$\" > \"\$FM_HOME/state/.lock\"; $(printf '%q' "$PI_BIN") --approve --offline --no-context-files --no-skills --no-prompt-templates --no-themes --no-extensions -e ./.pi/extensions/fm-console-bridge.ts -e ./journal-probe.ts --session-dir $(printf '%q' "$TMP_ROOT/sessions"); printf '\nPI_EXIT=%s\n' \"\$?\"; sleep 30")
+  "$TMP_ROOT/agent" "$FMHOME" "$NESTED_DIR" \
+  "$(printf '%q' "$PI_BIN") --approve --offline --no-context-files --no-skills --no-prompt-templates --no-themes --no-extensions -e ./.pi/extensions/fm-console-bridge.ts -e ./journal-probe.ts --session-dir $(printf '%q' "$TMP_ROOT/sessions"); printf '\nPI_EXIT=%s\n' \"\$?\"; sleep 30")
 
 tmux -L "$SOCKET" -f /dev/null new-session -d -s "$SESSION" -x 160 -y 40 -c "$PROJECT" "$PANE_CMD" \
   || fail "Pi $PI_VERSION: could not start the private tmux server"
 
-read -r first_gen first_conversation first_session <<<"$(wait_phase startup)"
-[ -n "$first_gen" ] || live_fail "startup checkpoint printed nothing"
 i=0
 until pane | grep -Fq 'journal-probe.ts'; do
   i=$((i + 1))
   [ "$i" -lt 200 ] || live_fail "did not reach its composer"
   sleep 0.05
 done
+sleep 1
+[ ! -e "$FMHOME/state/extensions" ] || live_fail "the journal started before any session held the lock"
+
+# Nested first: the primary now holds the lock but has published nothing.
+nested_round 1
+[ ! -e "$FMHOME/state/extensions" ] \
+  || live_fail "a Pi started inside the primary created the journal before the primary published (nested ancestry $(cat "$NESTED_DIR/mark-1.json"))"
+
+# The genuine owner activates on its next session start.
+type_line '/reload'
+read -r first_gen first_conversation first_session <<<"$(wait_phase published)"
+[ -n "$first_gen" ] || live_fail "first publication checkpoint printed nothing"
 
 type_line '/journal-e2e first'
 wait_phase first >/dev/null
 type_line '/journal-e2e operational'
 wait_phase operational >/dev/null
+
+# Primary first: a nested Pi started now changes nothing either.
+before_current=$(cat "$JOURNAL_DIR/current.json")
+before_files=$(ls "$JOURNAL_DIR")
+nested_round 2
+[ "$(cat "$JOURNAL_DIR/current.json")" = "$before_current" ] \
+  || live_fail "a Pi started inside the published primary rewrote current.json (nested ancestry $(cat "$NESTED_DIR/mark-2.json"))"
+[ "$(ls "$JOURNAL_DIR")" = "$before_files" ] || live_fail "a Pi started inside the published primary added journal files"
 
 type_line '/reload'
 read -r reload_gen reload_conversation reload_session <<<"$(wait_phase reload "$first_gen")"
@@ -305,4 +382,4 @@ until pane | grep -Fq 'PI_EXIT=0'; do
 done
 wait_phase quit >/dev/null
 
-pass "Pi $PI_VERSION: the lock-owning primary journals a snapshot, captain and operational input, streamed text with authoritative ends, and tool states without private content; /reload keeps the conversation in a new generation and /quit records the stop"
+pass "Pi $PI_VERSION: only the lock-owning primary journals - a Pi started inside it writes nothing before or after its publication - and the journal carries a snapshot, captain and operational input, streamed text with authoritative ends, and tool states without private content; /reload keeps the conversation in a new generation and /quit records the stop"
