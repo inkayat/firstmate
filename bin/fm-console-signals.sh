@@ -20,15 +20,35 @@
 # 64 KiB and is replaced by a temp-file rename inside state/.
 #
 # Sources, all structured and read-only:
-#   - Questions and waiting: this home's live captain holds (hold_bucket "live",
-#     the classification bin/fm-fleet-snapshot.sh owns), read through its
-#     --contribution-input mode. One question per live hold, newest hold first,
-#     at most four: id = the task id reduced to A-Za-z0-9._- (no leading dot,
-#     no "..", unique), topic = the task title, text = the decoded hold reason
-#     (the title when the reason is blank), since = the hold-set time when it
-#     is a full timestamp. Holds carry no structured answer options, so no
-#     question lists options. waiting is "waiting" on the first question while
-#     any live hold exists, else "none". Chat and status prose are never read.
+#   - Questions and waiting: the one combined view of everything waiting on
+#     the captain, `bin/fm-captain-pending.sh list --json`
+#     (fm-captain-pending-list.v1), which owns the classification. Only its
+#     live items become questions: open or overdue captain-pending ledger
+#     entries (chat-only asks), live captain holds, and live needs-decision
+#     status decisions; paused, parked, blocked, aged, expired, and stale
+#     items never do. Order: overdue ledger entries first, then newest first
+#     by creation time (a ledger entry's add time, a hold's hold-set time or
+#     since date; undated items last; equal times keep the newer ledger entry
+#     first), at most four. id = the item id (cp-<n> or the task id) reduced
+#     to A-Za-z0-9._- (no leading dot, no "..", unique); topic = the item's
+#     kind (question, approval, command, task, other, hold, or status) plus
+#     " · <task id>" when it names a task; text = the ask (a hold's title and
+#     reason; the topic when blank); since = the creation time when it is a
+#     full timestamp. No source carries answer options, so no question lists
+#     options. waiting is "waiting" on the first question while any live item
+#     exists, else "none"; its reason is the first question's topic, followed
+#     by "(+N more waiting)" when more than four live items exist. Chat and
+#     status prose outside these records are never read.
+#     When the view's fleet snapshot is unavailable (`list` exit 3), only the
+#     ledger is reliable: its entries are published with "holds and status
+#     decisions unreadable" in the reason, and with no open entry nothing is
+#     published (exit 1), so the previous file ages instead of claiming that
+#     nothing waits. Any other `list` failure also publishes nothing. `write`
+#     keeps the last complete view in state/.console-signals-pending.json and
+#     reuses it for up to 60 s while the home's .tasks.toml, the top-level
+#     files of data/, and every state/*.status and *.meta file are unchanged,
+#     so an idle fleet runs the view at most once a minute while a new or
+#     closed ask still shows on the next write; `print` never uses it.
 #   - Bots: the bot code's own interface, `fm-bot list --json` once and
 #     `fm-bot show <name> --json` per listed bot, run from $FM_CONFIG_ROOT/bin
 #     (a firstmate-config checkout), else from `fm-bot` on PATH, with this
@@ -37,29 +57,32 @@
 #     show is skipped with a bounded stderr line; with no lister the document
 #     has no bots. id/name = the spec name, enabled = not paused, state:
 #     paused for a paused spec; running when its last run is an in-flight
-#     backlog task, due when that task is queued or the bot code reports the
-#     daily window open now, idle for a daily bot otherwise, unknown for an
-#     active interval or remote bot that is neither (only the bot code's
-#     admission evaluation could tell). schedule is a short summary of the
-#     spec's trigger, scope its one-liner, next_due the next window or
-#     candidate when the bot code reports one; last_run is omitted because the
-#     bot code exposes a run id, not a time.
+#     backlog task (bin/fm-fleet-snapshot.sh --contribution-input, read only
+#     when the lister lists a bot), due when that task is queued or the bot
+#     code reports the daily window open now, idle for a daily bot otherwise,
+#     unknown for an active interval or remote bot that is neither (only the
+#     bot code's admission evaluation could tell). schedule is a short
+#     summary of the spec's trigger, scope its one-liner, next_due the next
+#     window or candidate when the bot code reports one; last_run is omitted
+#     because the bot code exposes a run id, not a time.
 #
 # Lock binding: the document is published only while state/.lock is held by a
 # live verified harness (bin/fm-session-lock-lib.sh fm_session_lock_inspect, the
 # reader `ready` uses). Otherwise `write` removes any existing file and exits 0,
 # and `print` exits 3 with nothing on stdout. This script never takes or
 # releases the session lock, never writes outside <home>/state/, never creates
-# that directory, and never mutates the backlog, holds, or bot specs.
+# that directory, and never mutates the backlog, holds, the captain-pending
+# ledger, or bot specs.
 #
 # Exit: 0 published (or removed with no held lock), 3 print with no held lock,
-# 1 refusal or failure (FM_HOME not explicit, no state directory, assembly or
-# write failure). Diagnostics go to stderr, prefixed "fm-console-signals:".
+# 1 refusal or failure (FM_HOME not explicit, no state directory, an
+# unreadable or unreliable captain-pending view as above, assembly or write
+# failure). Diagnostics go to stderr, prefixed "fm-console-signals:".
 #
 # Cadence: bin/fm-watch.sh runs `write` detached each poll while the home's
 # config/console-signals presence flag exists (docs/configuration.md "Console
-# signals"); FM_CONSOLE_SIGNALS_TIMEOUT (default 20 s) bounds the bot reads and
-# the backlog read each.
+# signals"); FM_CONSOLE_SIGNALS_TIMEOUT (default 20 s) bounds the
+# captain-pending view read and, separately, all bot reads together.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
