@@ -117,6 +117,10 @@
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
 #                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: captain inbox note queued: <keys>
+#                          a captain inbox note (bin/fm-inbox.sh) is queued, no
+#                          drain has presented it, and a row queued after it was
+#                          consumed without it; reported once per note
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -2804,16 +2808,23 @@ scan_signals() {
 # always written before its marker, so nothing is suppressed before it is queued,
 # and re-announcement, drain-time deduplication, and the handled acknowledgement
 # keep their existing owners untouched.
-procevent_surfaced_marker() {  # <queue-key>
-  printf '%s/.seen-procevent-%s' "$STATE" "$(printf '%s' "$1" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
+queued_check_surfaced_marker() {  # <marker-kind> <queue-key>
+  printf '%s/.seen-%s-%s' "$STATE" "$1" "$(printf '%s' "$2" | LC_ALL=C od -An -tx1 | tr -d ' \n')"
 }
 
-procevent_surface_after_output() {
-  local output_status=$1 key marker tmp status=0
+procevent_surfaced_marker() {  # <queue-key>
+  queued_check_surfaced_marker procevent "$1"
+}
+
+# Commit one .seen-<kind>-* marker per surfaced key once the reason line was
+# written, then release the queue lock the scan held through that output.
+queued_check_commit_markers() {  # <output-status> <marker-kind> <queue-key>...
+  local output_status=$1 kind=$2 key marker tmp status=0
+  shift 2
   if [ "$output_status" -eq 0 ]; then
-    for key in $PROCEVENT_SURFACED; do
-      marker=$(procevent_surfaced_marker "$key")
-      tmp=$(umask 077; mktemp "$STATE/.seen-procevent.XXXXXX") || { status=1; continue; }
+    for key in "$@"; do
+      marker=$(queued_check_surfaced_marker "$kind" "$key")
+      tmp=$(umask 077; mktemp "$STATE/.seen-$kind.XXXXXX") || { status=1; continue; }
       if ! mv -f -- "$tmp" "$marker"; then
         rm -f -- "$tmp"
         status=1
@@ -2822,6 +2833,11 @@ procevent_surface_after_output() {
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
+}
+
+procevent_surface_after_output() {
+  # shellcheck disable=SC2086 # Queue keys carry no whitespace: one argument each.
+  queued_check_commit_markers "$1" procevent $PROCEVENT_SURFACED
 }
 
 procevent_surface_queued() {
@@ -2860,6 +2876,94 @@ procevent_surface_queued() {
   # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
   FM_WAKE_POST_OUTPUT_ACTION=procevent_surface_after_output
   wake "$reason"
+}
+
+# Deliver a captain inbox note to firstmate. bin/fm-inbox.sh owns the note and
+# appends its one durable `check inbox:<id>` row from outside the watcher, and
+# the actor the next wake reaches normally takes it: main's drain presents every
+# queued row, and the downtime recovery below reports one no close was due for.
+# While attended, though, the Pi extension offers task-scoped closes to the
+# supervision branch, which never claims a main-only check row, and during a
+# stream of such closes the recovery waits on a handling episode nothing
+# settles, so the note would wait for whatever next wakes main. The evidence of
+# that is a row queued after the note and since consumed while the note stayed
+# queued and unpresented: the actor that acknowledged it passed the note over.
+# Only then does this step report the note, through its own actionable `check:`
+# exit, which the existing routing rule sends to main. Each row is surfaced
+# once, under the .seen-* discipline above, and never after a drain has
+# presented it to main or the branch: that actor holds it until it is
+# acknowledged.
+inbox_surface_after_output() {
+  # shellcheck disable=SC2086 # Queue keys carry no whitespace: one argument each.
+  queued_check_commit_markers "$1" inbox $INBOX_SURFACED
+}
+
+# Set INBOX_SURFACED to the queued inbox:* keys no drain has presented and no
+# close has surfaced yet; with `passed-over`, only those queued before a row
+# that has since been consumed. Run under the queue lock, where every append
+# advances the sequence counter, so the counter numbers every row ever queued.
+inbox_unsurfaced_keys_locked() {  # [passed-over]
+  local key counter=''
+  INBOX_SURFACED=
+  if [ "${1:-}" = passed-over ]; then
+    counter=$(cat "$STATE/.wake-queue.seq" 2>/dev/null || true)
+    case "$counter" in ''|*[!0-9]*) return 0 ;; esac
+  fi
+  while IFS= read -r key; do
+    [ -e "$(queued_check_surfaced_marker inbox "$key")" ] && continue
+    INBOX_SURFACED="$INBOX_SURFACED $key"
+  done < <(awk -F '\t' -v main="$STATE/.main-eligible-rows" -v branch="$STATE/.branch-eligible-rows" -v counter="$counter" '
+    BEGIN {
+      while ((getline line < main) > 0) presented[line] = 1
+      while ((getline line < branch) > 0) presented[line] = 1
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ {
+      queued[++rows] = $2 + 0
+      if ($3 == "check" && $4 ~ /^inbox:/ && !($2 in presented) && !seen[$4]++) {
+        notes[++n] = $4
+        note_seq[n] = $2 + 0
+      }
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        if (counter != "") {
+          # Rows numbered after the note, less those still queued: consumed.
+          later = 0
+          for (j = 1; j <= rows; j++) if (queued[j] > note_seq[i]) later++
+          if (counter - note_seq[i] <= later) continue
+        }
+        print notes[i]
+      }
+    }
+  ' "$FM_WAKE_QUEUE" 2>/dev/null)
+}
+
+inbox_surface_queued() {
+  [ -s "$FM_WAKE_QUEUE" ] || return 0
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  inbox_unsurfaced_keys_locked passed-over
+  if [ -z "$INBOX_SURFACED" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+  FM_WAKE_POST_OUTPUT_ACTION=inbox_surface_after_output
+  wake "check: captain inbox note queued:$INBOX_SURFACED"
+}
+
+# The recovery close hands every queued row to the next drain, so it delivers
+# any queued inbox note too: mark those surfaced with it rather than raising
+# them again. The close itself is unchanged.
+wake_recovery_close() {
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  inbox_unsurfaced_keys_locked
+  if [ -n "$INBOX_SURFACED" ]; then
+    # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
+    FM_WAKE_POST_OUTPUT_ACTION=inbox_surface_after_output
+  else
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fi
+  wake "check: rearm-resurface"
 }
 
 run_check_process() {
@@ -3516,7 +3620,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
     handling_successor_has_queued_row || return 0
-    wake "check: rearm-resurface"
+    wake_recovery_close
   fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
@@ -3525,7 +3629,7 @@ resurface_after_downtime() {
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
-  wake "check: rearm-resurface"
+  wake_recovery_close
 }
 
 while :; do
@@ -3634,6 +3738,8 @@ while :; do
   # A process-event result carries richer adapter-owned wake context than the
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
+  # Then a captain inbox note a branch-handled close passed over.
+  inbox_surface_queued
 
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation

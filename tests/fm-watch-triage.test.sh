@@ -6762,6 +6762,91 @@ test_procevent_marker_failure_exits_and_replays() {
   pass "marker failure exits through the shared wake owner, releases its lock, and replays later"
 }
 
+# --- captain inbox notes ------------------------------------------------------
+
+# bin/fm-watch.sh surfaces a captain inbox row through its own close once a row
+# queued after it was consumed without it (tests/fm-watch-arm.test.sh drives
+# that through real branch-handled closes). This queues a note through its real
+# producer, then lets the supervision branch claim, drain, and acknowledge a
+# task row queued after it, as one attended branch-handled close does, and
+# prints the note's queue key.
+queue_inbox_note_passed_over() {  # <dir>
+  local dir=$1 state="$1/state" grant="$ROOT/bin/fm-wake-grant.sh" seq
+  FM_HOME="$dir" "$ROOT/bin/fm-inbox.sh" note -- "captured during branch closes" >/dev/null || return 1
+  append_wake "$state" signal later.status "signal: later.status" || return 1
+  seq=$(awk -F '\t' '$4 == "later.status" { print $2 }' "$state/.wake-queue")
+  FM_STATE_OVERRIDE="$state" "$grant" activate "$$" triage-branch || return 1
+  FM_STATE_OVERRIDE="$state" "$grant" publish triage-branch "$seq" || return 1
+  FM_STATE_OVERRIDE="$state" FM_SUPERVISION_ACTOR=branch "$DRAIN" > "$dir/branch.out" 2> "$dir/branch.err" || return 1
+  FM_SUPERVISION_ACTOR=branch ack_drain_err "$state" "$dir/branch.err" >/dev/null 2>&1 || return 1
+  FM_STATE_OVERRIDE="$state" "$grant" release triage-branch || return 1
+  awk -F '\t' '$3 == "check" && $4 ~ /^inbox:/ { print $4 }' "$state/.wake-queue"
+}
+
+inbox_watch_bg() {  # <dir> <out> <handling-successor: 1|0>
+  PATH="$1/fakebin:$PATH" FM_HOME="$1" FM_CREW_STATE_BIN="$1/fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR="$3" FM_POLL=0.2 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$2" &
+}
+
+test_inbox_note_passed_over_surfaces_once() {
+  local dir state out pid key
+  dir=$(make_case inbox-note-passed-over); state="$dir/state"; out="$dir/watch.out"
+  key=$(queue_inbox_note_passed_over "$dir") || fail "the fixture could not pass a captain inbox note over"
+  [ -n "$key" ] || fail "the note queued no inbox row"
+  inbox_watch_bg "$dir" "$out" 1; pid=$!
+  wait_for_exit "$pid" 100 || fail "a note the branch passed over did not wake the watcher: $(cat "$out")"
+  grep -Fx "check: captain inbox note queued: $key" "$out" >/dev/null \
+    || fail "the close did not report the passed-over note: $(cat "$out")"
+  # Main has yet to drain the note, and the next watcher must leave it to main.
+  inbox_watch_bg "$dir" "$out.again" 1; pid=$!
+  wait_poll_cycle "$state" "$pid" || fail "an already-surfaced note woke the next watcher: $(cat "$out.again")"
+  reap "$pid"
+  pass "a captain inbox note the branch passed over is surfaced once, through its own close"
+}
+
+# A row a drain has already presented is in that actor's hands until it is
+# acknowledged, so the watcher must leave it alone.
+test_inbox_note_presented_by_a_drain_is_not_resurfaced() {
+  local dir state out pid key
+  dir=$(make_case inbox-note-presented); state="$dir/state"; out="$dir/watch.out"
+  key=$(queue_inbox_note_passed_over "$dir") || fail "the fixture could not pass a captain inbox note over"
+  [ -n "$key" ] || fail "the note queued no inbox row"
+  # Main drains for another reason while the note is queued, so the note is
+  # presented by that drain and stays queued until main acknowledges it.
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>&1 || fail "the mid-turn drain failed"
+  grep -qx '[0-9][0-9]*' "$state/.main-eligible-rows" \
+    || fail "fixture is vacuous: the drain recorded no presented row"
+  inbox_watch_bg "$dir" "$out" 1; pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || fail "a note main's drain had already presented woke the watcher again: $(cat "$out")"
+  reap "$pid"
+  ! grep -F "$key" "$out" >/dev/null || fail "an already-presented note was surfaced again: $(cat "$out")"
+  pass "a captain inbox note a drain already presented is left to that drain's actor, not surfaced again"
+}
+
+# The downtime recovery's close hands every queued row to main's next drain, a
+# passed-over note included, so a successor must not raise that note again.
+test_inbox_note_handed_over_by_a_recovery_close_is_not_resurfaced() {
+  local dir state out pid key
+  dir=$(make_case inbox-note-recovered); state="$dir/state"; out="$dir/watch.out"
+  key=$(queue_inbox_note_passed_over "$dir") || fail "the fixture could not pass a captain inbox note over"
+  [ -n "$key" ] || fail "the note queued no inbox row"
+  # A settled handling turn turns the row left for main into a downtime episode.
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_recovery_marker_handling_settled "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watcher-down" || fail "the handled turn could not settle"
+  grep -q '^pending:downtime:' "$state/.watcher-down" \
+    || fail "fixture is vacuous: no downtime episode is pending: $(cat "$state/.watcher-down")"
+  inbox_watch_bg "$dir" "$out" 0; pid=$!
+  wait_for_exit "$pid" 100 || fail "the pending downtime episode did not wake the watcher: $(cat "$out")"
+  [ "$(cat "$out")" = "check: rearm-resurface" ] || fail "the recovery did not close alone: $(cat "$out")"
+  inbox_watch_bg "$dir" "$out.again" 1; pid=$!
+  wait_poll_cycle "$state" "$pid" \
+    || fail "a note the recovery close handed over woke the successor: $(cat "$out.again")"
+  reap "$pid"
+  pass "a captain inbox note a recovery close handed over is not surfaced again"
+}
+
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
 test_heartbeat_no_change_absorbed() {
@@ -7453,6 +7538,9 @@ test_procevent_launch_failed_episodes_are_each_delivered
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
+test_inbox_note_passed_over_surfaces_once
+test_inbox_note_presented_by_a_drain_is_not_resurfaced
+test_inbox_note_handed_over_by_a_recovery_close_is_not_resurfaced
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
