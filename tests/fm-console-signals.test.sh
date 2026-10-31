@@ -446,7 +446,7 @@ test_ledger_entries_of_each_kind() {
     "the question text is the recorded ask"
   assert_equals 'waiting|task|cp-4' "$(jq -r '.waiting | "\(.state)|\(.reason)|\(.question_id)"' "$f")" \
     "an open ledger entry makes FirstMate wait on it"
-  [ "$(jq -r '[.questions[] | .since | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")] | all and (.questions[0].since == .waiting.since)' "$f")" = true ] \
+  [ "$(jq -r '([.questions[] | .since | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")] | all) and (.questions[0].since == .waiting.since)' "$f")" = true ] \
     || fail "each entry's add time must be its question's since, and the first one the wait's: $(cat "$f")"
   [ "$(jq -r '[.questions[] | has("options")] | any' "$f")" = false ] || fail "no options may be invented"
 
