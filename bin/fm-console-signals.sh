@@ -110,7 +110,12 @@ if [ -n "${FM_CONFIG_ROOT:-}" ] && [ -f "$FM_CONFIG_ROOT/bin/fm-bot" ] && [ -x "
 elif command -v fm-bot >/dev/null 2>&1; then
   BOT_BIN=$(command -v fm-bot)
 fi
+TIMEOUT=${FM_CONSOLE_SIGNALS_TIMEOUT:-20}
+case "$TIMEOUT" in
+  ''|0*|*[!0-9]*) TIMEOUT=20 ;;
+esac
+[ "$TIMEOUT" -le 300 ] || TIMEOUT=20
 
 exec python3 "$SCRIPT_DIR/fm-console-signals.py" "$MODE" \
   --home "$HOME_DIR" --lock-pid "$FM_LOCK_INSPECT_PID" --code-root "$FM_ROOT" \
-  --bot-bin "$BOT_BIN" --timeout "${FM_CONSOLE_SIGNALS_TIMEOUT:-20}"
+  --bot-bin "$BOT_BIN" --timeout "$TIMEOUT"

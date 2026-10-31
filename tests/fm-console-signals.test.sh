@@ -304,7 +304,8 @@ test_empty_state() {
   local home pid out
   home=$(make_home empty)
   hold_lock "$home"; pid=$LOCK_PID
-  out=$(run_signals "$home" "" print) || fail "print on an empty home failed"
+  out=$(FM_CONSOLE_SIGNALS_TIMEOUT=soon run_signals "$home" "" print) \
+    || fail "print on an empty home failed (a malformed timeout must fall back to its default)"
   printf '%s' "$out" > "$TMP_ROOT/empty.json"
   check "$TMP_ROOT/empty.json" "$home" "$pid" "empty-home document"
   assert_equals 'none|0|0' \
