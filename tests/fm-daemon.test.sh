@@ -1940,6 +1940,32 @@ EOF
   pass "a captain-held decision-owned row is self-handled without escalation, now and on repeat"
 }
 
+# The away daemon relays every check wake, a captain inbox note included, to
+# the supervisor before it acknowledges the batch. The drain refuses to consume
+# a still-pending note's wake unless the acknowledgement names that note, so the
+# daemon must name exactly the notes it relayed, or the whole queue would stall
+# behind a note only the returning firstmate can answer.
+test_away_daemon_acknowledges_a_relayed_inbox_note_by_name() {
+  local dir state id out
+  dir=$(make_supercase inbox-note-relay)
+  state="$dir/state"
+  mkdir -p "$dir/config"
+  : > "$dir/config/supervision-host-off"
+  out=$(printf 'captain note from the phone\n' | FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-inbox.sh" note -) || fail "setup: the inbox note was not queued"
+  id=${out#queued }; id=${id%%$'\n'*}
+  append_wake "$state" heartbeat heartbeat heartbeat || fail "setup: heartbeat append failed"
+
+  FM_DAEMON_DIR="$ROOT/bin" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_ESCALATE_BATCH_SECS=999 handle_durable_wakes fallback "$state" 2>"$dir/err" \
+    || fail "the away daemon did not acknowledge a relayed inbox note: $(cat "$dir/err")"
+  [ ! -s "$state/.wake-queue" ] || fail "the relayed batch stayed queued: $(cat "$state/.wake-queue")"
+  assert_grep "captain inbox note $id" "$state/.subsuper-escalations" "the inbox note was not relayed"
+  [ -f "$state/inbox/$id.note" ] || fail "the daemon handled the captain's note itself"
+  assert_grep "note=$id" "$state/inbox/.ack-overrides.log" "the daemon's named acknowledgement was not logged"
+  pass "the away daemon acknowledges a relayed captain inbox note by name, leaving the note pending"
+}
+
 test_inject_skip_forces_self() {
   local dir state
   dir=$(make_supercase skip)
@@ -3494,6 +3520,7 @@ test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_needs_decision_queued_row_escalates_once_as_the_decision
+test_away_daemon_acknowledges_a_relayed_inbox_note_by_name
 test_captain_held_decision_owned_row_is_self_handled
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout

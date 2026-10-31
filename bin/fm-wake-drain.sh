@@ -9,6 +9,15 @@
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
+#
+# Captain inbox notes: an acknowledgement never consumes the `check inbox:<id>`
+# wake of a note that is still pending in state/inbox/. It exits 3 with nothing
+# consumed, naming each such note and the commands that handle it, unless
+# --allow-pending-notes names that exact id; each id let through that way is
+# logged to state/inbox/.ack-overrides.log first. The handling order is: drain,
+# read each note, answer it where an answer is owed (bin/fm-inbox.sh reply),
+# mark it handled (bin/fm-inbox.sh drain --ack), then acknowledge the wake range.
+#
 # Every scratch file this script mints (.main-eligible-rows.tmp.*,
 # .wake-rows.consume.*, .wake-queue.retire.*, .wake-queue.ack.*,
 # .wake-queue.actor-view.*) is created and removed under the queue lock, so one
@@ -217,6 +226,137 @@ presented_max_row() { # <rows-file>
   fi
 }
 
+# --- captain inbox notes ------------------------------------------------------
+# bin/fm-inbox.sh owns the inbox layout: a pending note is <inbox>/<id>.note,
+# a handled one sits in <inbox>/handled/, and its one wake is the queue row
+# `check inbox:<id>`. That row is the note's only notification, so an
+# acknowledgement whose range holds the row of a still-pending note is refused
+# (exit 3, nothing consumed) unless --allow-pending-notes names that exact id;
+# each id let through that way is logged to OVERRIDE_LOG first.
+INBOX_DIR="$STATE/inbox"
+OVERRIDE_LOG="$INBOX_DIR/.ack-overrides.log"
+NOTE_LINE_MAX=160
+ALLOW_PENDING_NOTES=
+
+valid_note_id() {
+  case "$1" in ''|*..*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+}
+
+# A note blocks only while it is provably pending: a readable regular file in
+# the inbox with no handled copy. A vanished, unreadable, symlinked, or
+# already-handled note never blocks, so a stale row cannot wedge the queue.
+note_is_pending() {  # <id>
+  local note="$INBOX_DIR/$1.note" handled="$INBOX_DIR/handled/$1.note"
+  valid_note_id "$1" || return 1
+  [ -f "$note" ] && [ ! -L "$note" ] && [ -r "$note" ] || return 1
+  [ ! -e "$handled" ] && [ ! -L "$handled" ]
+}
+
+# Set NOTE_LINE to the first non-blank body line of note <id>, read from a
+# bounded prefix, stripped of control, C1, bidi, and line-separator
+# characters, and cut to NOTE_LINE_MAX bytes on a UTF-8 boundary.
+note_first_line() {  # <id>
+  local LC_ALL=C line
+  line=$(head -c 65536 "$INBOX_DIR/$1.note" 2>/dev/null | tr -d '\000' \
+    | awk 'body && /[^[:space:]]/ { print; exit } /^--$/ { body = 1 }' 2>/dev/null) || line=
+  line=$(printf '%s' "$line" | tr '\t\r' '  ' | tr -d '\001-\037\177')
+  line=${line//$'\xc2'[$'\x80'-$'\x9f']/}
+  line=${line//$'\xe2\x80'[$'\x8b'-$'\x8f']/}
+  line=${line//$'\xe2\x80'[$'\xa8'-$'\xae']/}
+  line=${line//$'\xe2\x81'[$'\xa6'-$'\xa9']/}
+  line=${line//$'\xd8\x9c'/}
+  [ -n "$line" ] || line='(no text)'
+  cap_outcome_line "$line" "$NOTE_LINE_MAX"
+  NOTE_LINE=$OUTCOME_LINE
+}
+
+note_allowed() {  # <id>
+  case ",$ALLOW_PENDING_NOTES," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
+# Under the queue lock and before anything is claimed or consumed: print
+# "<id>\t<rows>" for every pending note whose wake row this acknowledgement
+# would consume, one line per note, rows comma-joined. The row set mirrors the
+# consume step below: the branch takes only its granted rows, main every row
+# it owns or that no live branch grant reserves.
+acked_pending_note_rows_locked() {  # <cutoff>
+  local seq id rows
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  awk -F '\t' -v cutoff="$1" -v actor="$ACTOR" -v main="$MAIN_ROWS_FILE" -v branch="$ELIGIBLE_ROWS_FILE" '
+    BEGIN {
+      while ((getline line < branch) > 0) reserved[line] = 1
+      while ((getline line < main) > 0) owned[line] = 1
+    }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && $2 + 0 <= cutoff + 0 && $3 == "check" && $4 ~ /^inbox:/ {
+      if (actor == "branch" ? !($2 in reserved) : (!($2 in owned) && ($2 in reserved))) next
+      id = substr($4, 7)
+      if (!(id in rows)) order[++n] = id
+      rows[id] = (id in rows) ? rows[id] "," $2 : $2
+    }
+    END { for (i = 1; i <= n; i++) printf "%s\t%s\n", order[i], rows[order[i]] }
+  ' "$FM_WAKE_QUEUE" | while IFS=$(printf '\t') read -r id rows; do
+    note_is_pending "$id" || continue
+    printf '%s\t%s\n' "$id" "$rows"
+  done
+}
+
+# Refuse an acknowledgement that would drop a pending note's only wake, or log
+# each explicitly allowed one before anything is consumed. Exit 3 on refusal.
+guard_pending_note_acks_locked() {
+  local acked id rows blocked='' allowed='' now
+  acked=$(acked_pending_note_rows_locked "$ACK_THROUGH") || exit 1
+  [ -n "$acked" ] || return 0
+  while IFS=$(printf '\t') read -r id rows; do
+    if note_allowed "$id"; then
+      allowed="$allowed$id	$rows
+"
+    else
+      blocked="$blocked$id	$rows
+"
+    fi
+  done <<EOF
+$acked
+EOF
+  if [ -n "$blocked" ]; then
+    {
+      printf 'wake drain: refused to acknowledge through %s: that range holds the only wake of a captain inbox note that is still pending, so acknowledging it would drop the note unseen; nothing was acknowledged.\n' "$ACK_THROUGH"
+      while IFS=$(printf '\t') read -r id rows; do
+        [ -n "$id" ] || continue
+        note_first_line "$id"
+        printf '  %s (wake row %s): %s\n' "$id" "$rows" "$NOTE_LINE"
+      done <<EOF
+$blocked
+EOF
+      printf 'wake drain: read each note (bin/fm-inbox.sh list), answer it where an answer is owed, mark it handled, then re-run the acknowledgement:\n'
+      while IFS=$(printf '\t') read -r id rows; do
+        [ -n "$id" ] || continue
+        printf "  bin/fm-inbox.sh reply %s '<answer>'   (only where an answer is owed)\n" "$id"
+        printf '  bin/fm-inbox.sh drain --ack %s\n' "$id"
+      done <<EOF
+$blocked
+EOF
+      printf '  bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' "$ACK_THROUGH" "$ACK_GENERATION"
+      printf 'wake drain: only for a note deliberately left pending, name each id: bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s --allow-pending-notes <id>[,<id>...] (logged; the note stays listed under PENDING CAPTAIN NOTES at every drain until it is handled)\n' \
+        "$ACK_THROUGH" "$ACK_GENERATION"
+    } >&2
+    exit 3
+  fi
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  while IFS=$(printf '\t') read -r id rows; do
+    [ -n "$id" ] || continue
+    if ! printf '%s\tack-through=%s\tactor=%s\tnote=%s\trows=%s\n' "$now" "$ACK_THROUGH" "$ACTOR" "$id" "$rows" \
+      >> "$OVERRIDE_LOG" 2>/dev/null; then
+      printf 'wake drain: the pending-note override could not be logged to %s; nothing was acknowledged\n' "$OVERRIDE_LOG" >&2
+      exit 1
+    fi
+    printf 'wake drain: acknowledging the wake of pending captain note %s by explicit override (logged to %s); the note stays pending and is listed under PENDING CAPTAIN NOTES at every drain until it is handled\n' \
+      "$id" "$OVERRIDE_LOG" >&2
+  done <<EOF
+$allowed
+EOF
+}
+
 case "${1:-}" in
   '') ;;
   --ack-through)
@@ -226,9 +366,23 @@ case "${1:-}" in
       || { echo "wake drain: acknowledgement requires its recovery generation" >&2; exit 2; }
     ACK_GENERATION=${4:-}
     case "$ACK_GENERATION" in ''|*[!A-Za-z0-9._-]*) echo "wake drain: invalid recovery generation" >&2; exit 2 ;; esac
-    [ "$#" -eq 4 ] || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+    case "$#" in
+      4) ;;
+      6)
+        [ "$5" = --allow-pending-notes ] \
+          || { echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2; }
+        ALLOW_PENDING_NOTES=$6
+        _allowed_ids=$ALLOW_PENDING_NOTES,
+        while [ -n "$_allowed_ids" ]; do
+          valid_note_id "${_allowed_ids%%,*}" \
+            || { echo "wake drain: --allow-pending-notes takes comma-separated note ids, each named exactly" >&2; exit 2; }
+          _allowed_ids=${_allowed_ids#*,}
+        done
+        ;;
+      *) echo "wake drain: unexpected acknowledgement arguments" >&2; exit 2 ;;
+    esac
     ;;
-  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION]" >&2; exit 2 ;;
+  *) echo "usage: fm-wake-drain.sh [--ack-through SEQUENCE --recovery-generation GENERATION [--allow-pending-notes ID[,ID...]]]" >&2; exit 2 ;;
 esac
 
 [ "$ACTOR" != branch ] || require_branch_eligible_rows || exit 1
@@ -850,6 +1004,7 @@ if [ -n "$ACK_THROUGH" ]; then
   else
     PRESENTED_MAX=$(presented_max_row "$MAIN_ROWS_FILE") || exit 1
   fi
+  guard_pending_note_acks_locked
   if [ "$ACTOR" = main ]; then
     # Preserve main's original whole-cutoff acknowledgement contract: a direct
     # or replayed main ack still owns every unreserved row through its cutoff,
