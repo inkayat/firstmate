@@ -112,6 +112,27 @@ export async function encodeFirstmateOperationalInputWith(
   return encoded;
 }
 
+// The awaited classify, for a caller that must not stop Pi's thread for the
+// child (the console journal classifies on its writer, after the event that
+// carried the text has returned). Unlike the synchronous form it tells a
+// non-match, which the CLI reports as exit 1, from a failure to answer, which
+// throws, so a caller can withhold text it could not classify rather than
+// treat it as captain input.
+export async function classifyFirstmateOperationalTextWith(
+  run: OperationalInputRunner,
+  content: string,
+): Promise<string | undefined> {
+  const invocation = firstmateShellInvocation(
+    operationalInputScript,
+    operationalInputArgs("classify"),
+  );
+  const result = await run(invocation.command, invocation.args, { input: content });
+  if (result.status === 1) return undefined;
+  const kind = operationalInputAnswer("classify", result.status, result.stdout);
+  if (!kind) throw new Error("could not classify Firstmate operational input");
+  return kind;
+}
+
 export function classifyFirstmateOperationalText(content: string): string | undefined {
   return runOperationalInputCommand("classify", content);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strict no-emit production-consumer checks against public Pi 1.1.0 and 1.2.0.
+# Strict no-emit production-consumer checks against public Pi 1.1.0, 1.2.0, and 1.4.0.
 # Owns temporary npm dependencies and TypeScript 5.9.3; never uses global tsc
 # or FM_PI_PACKAGE_DIR. Compiler-owning lint/CI phases run this check.
 set -eu
@@ -18,12 +18,13 @@ trap 'rm -rf "$DEPENDENCY_ROOT"' EXIT
 
 printf 'Pi production-consumer typechecks: npm %s\n' "$(npm --version)"
 result=0
-for version in 1.1.0 1.2.0; do
+for version in 1.1.0 1.2.0 1.4.0; do
 TMP_ROOT="$DEPENDENCY_ROOT/sdk-$version"
 mkdir -p "$TMP_ROOT/lib"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$TMP_ROOT/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/fm-primary-pi-watch.ts"
+cp "$ROOT/.pi/extensions/fm-console-bridge.ts" "$TMP_ROOT/fm-console-bridge.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$TMP_ROOT/fm-primary-turnend-guard.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$TMP_ROOT/lib/fm-branch-dispatch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$TMP_ROOT/lib/fm-native-contract.ts"
@@ -37,6 +38,11 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visib
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$TMP_ROOT/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/lib/fm-operational-input.ts"
+# The omp console journal extension imports the Pi one from ../../.pi/extensions/,
+# so give it that layout over the same copies.
+mkdir -p "$TMP_ROOT/omp/extensions" "$TMP_ROOT/.pi"
+ln -s .. "$TMP_ROOT/.pi/extensions"
+cp "$ROOT/.omp/extensions/fm-console-bridge.ts" "$TMP_ROOT/omp/extensions/fm-console-bridge.ts"
 cat > "$TMP_ROOT/package.json" <<'JSON'
 {"type":"module"}
 JSON
@@ -52,7 +58,7 @@ cat > "$TMP_ROOT/tsconfig.json" <<'JSON'
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["*.ts", "lib/*.ts"]
+  "include": ["*.ts", "lib/*.ts", "omp/extensions/*.ts"]
 }
 JSON
 

@@ -108,6 +108,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- The opt-in console-signals file `state/console-signals.json` and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -740,6 +741,18 @@ Publishing is best-effort and never changes what the watcher does; no spawn read
 `bin/fm-capacity.sh --admit` is an advisory check of the same verdict: it exits 0 when the verdict admits or the file is absent, and reports the reasons on stderr with exit 75 when it does not.
 No Firstmate script calls it.
 The script's header owns the report line, the published document's fields, the verdict, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks.
+
+## Console signals (config/console-signals)
+
+The optional local, gitignored `config/console-signals` presence flag opts this home into publishing `state/console-signals.json`, the `fm-console-signals.v1` file Astro's FirstMate page (the herdr-console repository) reads to show that FirstMate waits for the captain and why, its open questions, and its registered bots.
+The consumer's `docs/firstmate-console-signals.md` in that repository is the authority for the format; [`bin/fm-console-signals.sh`](../bin/fm-console-signals.sh)'s header owns what this home puts in it, and `bin/fm-console-signals.sh print` shows the current document without writing it.
+Create the flag with `touch "$FM_HOME/config/console-signals"`; remove it to stop publishing, and the last file then goes stale on its own.
+The flag is a home-local choice and is not inherited by secondmate homes.
+
+While the flag exists, the watcher runs `bin/fm-console-signals.sh write` detached at each poll once the file is at least 10 seconds old, so at the default 15-second poll it is rewritten about every 15 seconds and a new or answered captain hold shows within one poll.
+The questions come only from this home's live captain holds, and the bots only from the bot code's own `fm-bot list` and `show` output, never from chat or status prose.
+The file is written only while the home's session lock is held, carries that lock's pid, and is removed when the lock is free or stale.
+Publishing adds no model call, no network access, and no long-lived process: each run is one short local process the watcher never waits for, and a slow or failing run only leaves the previous file to age and its reasons in `state/.console-signals.log`.
 
 ## PR-ready line after green (config/ready-after-green)
 
@@ -2923,6 +2936,8 @@ FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this ho
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536
 FM_HOME_SUMMARY_FAILURE_REPORT=2   # recorded publication failures since the ledger's own last publication before session start reports a HOME_SUMMARY line; invalid or zero values use 2
+FM_CONSOLE_SIGNALS_TIMEOUT=20   # seconds bounding bin/fm-console-signals.sh's backlog read and, separately, all of its bot-lister calls together; values outside 1-300 use 20
+FM_CONFIG_ROOT=                 # a firstmate-config checkout whose bin/fm-bot bin/fm-console-signals.sh lists bots with; unset or without that file, an fm-bot on PATH is used, else no bots are published
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each local per-task current-state read inside bin/fm-fleet-snapshot.sh; remote endpoint liveness is not probed on the snapshot path
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8   # maximum local tasks whose current-state and endpoint observations are collected concurrently during snapshot composition
 FM_SNAPSHOT_BUDGET=5                # one total seconds budget for all concurrent remote home-ledger reads
