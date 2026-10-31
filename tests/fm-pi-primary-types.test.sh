@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strict no-emit production-consumer checks against public Pi 1.1.0 and 1.2.0.
+# Strict no-emit production-consumer checks against public Pi 1.1.0, 1.2.0, and 1.4.0.
 # Owns temporary npm dependencies and TypeScript 5.9.3; never uses global tsc
 # or FM_PI_PACKAGE_DIR. Compiler-owning lint/CI phases run this check.
 set -eu
@@ -18,7 +18,7 @@ trap 'rm -rf "$DEPENDENCY_ROOT"' EXIT
 
 printf 'Pi production-consumer typechecks: npm %s\n' "$(npm --version)"
 result=0
-for version in 1.1.0 1.2.0; do
+for version in 1.1.0 1.2.0 1.4.0; do
 TMP_ROOT="$DEPENDENCY_ROOT/sdk-$version"
 mkdir -p "$TMP_ROOT/lib"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$TMP_ROOT/fm-branch-supervision.ts"
