@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # tests/fm-console-signals.test.sh - the fm-console-signals.v1 producer.
 #
-# Drives bin/fm-console-signals.sh against synthetic homes only: a live captain
-# hold made through the real bin/fm-captain-hold.sh, handwritten backlog rows
-# for hostile and bucketed holds, a stand-in bot lister that answers the
-# `fm-bot list --json` / `show NAME --json` interface, and a renamed process as
-# the session-lock holder. Every produced file is checked field by field by an
-# independent checker written from the consumer's contract (Astro
+# Drives bin/fm-console-signals.sh against synthetic homes only: captain-pending
+# ledger entries made through the real bin/fm-captain-pending.sh, a live
+# captain hold made through the real bin/fm-captain-hold.sh, handwritten backlog
+# rows for hostile and bucketed holds, keyed status decisions on synthetic
+# tasks, a stand-in bot lister that answers the `fm-bot list --json` /
+# `show NAME --json` interface, and a renamed process as the session-lock
+# holder. Every produced file is checked field by field by an independent
+# checker written from the consumer's contract (Astro
 # docs/firstmate-console-signals.md): bounds in bytes, id rules, unique ids,
 # question_id naming a listed question, the 64 KiB cap, and no control
 # characters or escape sequences.
@@ -226,6 +228,25 @@ run_captain() {  # <home> <args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+run_pending() {  # <home> <args...>
+  local home=$1
+  shift
+  FM_HOME="$home" bash "$ROOT/bin/fm-captain-pending.sh" "$@"
+}
+
+# decision_task <home> <task-id> <status lines>: a synthetic task whose status
+# log carries keyed decisions.
+decision_task() {
+  mkdir -p "$1/projects/$2"
+  fm_write_meta "$1/state/$2.meta" "kind=ship" "worktree=$1/projects/$2" "project=sample" "harness=claude"
+  printf '%s\n' "$3" > "$1/state/$2.status"
+}
+
+# qs <file> <jq expression per question>: the values joined by commas.
+qs() {
+  jq -r "[.questions // [] | .[] | $2] | join(\",\")" "$1"
+}
+
 check() {  # <file> <home> <lock-pid> <message>
   local out
   out=$(python3 "$CHECKER" "$1" "$2" "$3" 2>&1) || fail "$4: $out"
@@ -312,6 +333,8 @@ test_empty_state() {
     "$(printf '%s' "$out" | jq -r '"\(.waiting.state // "none")|\(.questions // [] | length)|\(.bots // [] | length)"')" \
     "an empty home waits on nothing and lists no questions or bots"
   assert_absent "$home/state/console-signals.json" "print must not write"
+  run_signals "$home" "" write || fail "write on an empty home failed"
+  assert_absent "$home/data/captain-pending.jsonl" "the producer never creates the captain-pending ledger"
   pass "an empty home publishes a valid document with nothing waiting"
 }
 
@@ -327,12 +350,12 @@ test_live_hold_through_real_hold() {
   run_signals "$home" "" write || fail "write failed"
   check "$home/state/console-signals.json" "$home" "$pid" "real-hold file"
   doc=$(cat "$home/state/console-signals.json")
-  assert_equals 'waiting|App launch behavior|launch-q' \
+  assert_equals 'waiting|hold · launch-q|launch-q' \
     "$(printf '%s' "$doc" | jq -r '"\(.waiting.state)|\(.waiting.reason)|\(.waiting.question_id)"')" \
     "a live hold makes FirstMate wait on its question"
-  assert_equals $'How should a shortcut open an app (already running)?\nReuse or open new.' \
-    "$(printf '%s' "$doc" | jq -r '.questions[0].text')" "the question text is the decoded hold reason, line breaks kept"
-  assert_equals 'launch-q|App launch behavior|false' \
+  assert_equals $'App launch behavior: How should a shortcut open an app (already running)?\nReuse or open new.' \
+    "$(printf '%s' "$doc" | jq -r '.questions[0].text')" "the question text is the hold's title and decoded reason, line breaks kept"
+  assert_equals 'launch-q|hold · launch-q|false' \
     "$(printf '%s' "$doc" | jq -r '.questions[0] | "\(.id)|\(.topic)|\(has("options"))"')" \
     "the question carries id and topic and invents no options"
   [ "$(printf '%s' "$doc" | jq -r '.questions[0].since == .waiting.since and (.waiting.since | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))')" = true ] \
@@ -367,18 +390,18 @@ test_only_live_holds_newest_first_capped() {
   doc=$(cat "$home/state/console-signals.json")
   assert_equals 'call-6,call-5,call-4,call-3' "$(printf '%s' "$doc" | jq -r '[.questions[].id] | join(",")')" \
     "only live holds, newest hold first, at most four"
-  assert_equals 'call-6|Call 6' "$(printf '%s' "$doc" | jq -r '"\(.waiting.question_id)|\(.waiting.reason)"')" \
-    "the wait names the first question"
-  pass "dated, blocked, and aged holds never wait; live holds are newest first and capped at four"
+  assert_equals 'call-6|hold · call-6 (+2 more waiting)' "$(printf '%s' "$doc" | jq -r '"\(.waiting.question_id)|\(.waiting.reason)"')" \
+    "the wait names the first question and counts the live asks left out"
+  pass "dated, blocked, and aged holds never wait; live holds are newest first, capped at four, the rest counted"
 }
 
 test_hostile_hold_content() {
   local home pid title reason long doc
   home=$(make_home hostile)
   hold_lock "$home"; pid=$LOCK_PID
-  # A title whose 80-byte cut lands inside a three-byte rune, with an escape
-  # sequence and a bell; a reason with CR LF, colour and OSC sequences, C0/C1
-  # controls, and far more than 2048 bytes of multibyte text.
+  # A title with an escape sequence and a bell; a reason with CR LF, colour
+  # and OSC sequences, C0/C1 controls, and far more than 2048 bytes of
+  # multibyte text, so the 2048-byte cut must land on a rune boundary.
   title=$'\e[31mÖ'"$(printf 'ş%.0s' $(seq 1 30))"$'\a'"$(printf '€%.0s' $(seq 1 20))"
   long=$(printf 'ğ€%.0s' $(seq 1 700))
   reason=$'Line one\r\nLine two\e]0;title\a\e[1mbold\e[0m\x01\x7f'$'\xc2\x85'"$long"
@@ -389,17 +412,174 @@ test_hostile_hold_content() {
   assert_equals 'Weird.id-with-colon' "$(printf '%s' "$doc" | jq -r '.questions[0].id')" \
     "a task id is reduced to the contract's id alphabet"
   assert_equals 'dot-led' "$(printf '%s' "$doc" | jq -r '.questions[1].id')" "an id never starts with a dot"
-  assert_equals 'Second' "$(printf '%s' "$doc" | jq -r '.questions[1].text')" \
-    "a blank reason falls back to the topic so the required text is never empty"
+  assert_equals 'Second' "$(printf '%s' "$doc" | jq -r '.questions[1].text | rtrimstr(":")')" \
+    "a blank reason leaves the title as the required text"
   case "$(printf '%s' "$doc" | jq -r '.questions[0].text')" in
-    $'Line one\nLine two'*) ;;
-    *) fail "CR LF must become a kept line break, escapes removed" ;;
+    "Ö$(printf 'ş%.0s' $(seq 1 30))$(printf '€%.0s' $(seq 1 20))"$': Line one\nLine two'*) ;;
+    *) fail "the title is cleaned and CR LF must become a kept line break, escapes removed" ;;
   esac
   assert_equals true "$(printf '%s' "$doc" | jq -r '.questions[0].text | split("\n")[1] | startswith("Line twoboldğ€")')" \
     "escape sequences are removed whole, controls dropped, and nothing of them is left as text"
-  assert_equals "Ö$(printf 'ş%.0s' $(seq 1 30))€€€€€…" "$(printf '%s' "$doc" | jq -r '.questions[0].topic')" \
-    "the topic is cleaned, then cut to 80 bytes on a rune boundary with an ellipsis"
+  assert_equals 'true|hold · Weird..id/with:colon' \
+    "$(printf '%s' "$doc" | jq -r '.questions[0] | "\(.text | endswith("…"))|\(.topic)"')" \
+    "the text is cut to 2048 bytes on a rune boundary with an ellipsis, and the topic names the hold's task"
   pass "hostile hold ids, titles, and reasons are cut on rune boundaries and cleaned"
+}
+
+# --- the captain-pending ledger ---------------------------------------------
+
+test_ledger_entries_of_each_kind() {
+  local home pid f
+  home=$(make_home ledger-kinds)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  run_pending "$home" add --kind question --task ship-x -- "Ship on Friday?" >/dev/null || fail "add question failed"
+  run_pending "$home" add --kind approval -- "Approve the release notes" >/dev/null || fail "add approval failed"
+  run_pending "$home" add --kind command -- "Run gh auth login" >/dev/null || fail "add command failed"
+  run_pending "$home" add --kind task -- "Renew the domain" >/dev/null || fail "add task failed"
+  run_signals "$home" "" write || fail "write failed"
+  check "$f" "$home" "$pid" "ledger file"
+  assert_equals 'cp-4,cp-3,cp-2,cp-1' "$(qs "$f" .id)" "every open chat-only entry is a question, newest first"
+  assert_equals 'task,command,approval,question · ship-x' "$(qs "$f" .topic)" \
+    "the topic is the entry's kind, with its task when one is linked"
+  assert_equals 'Renew the domain,Run gh auth login,Approve the release notes,Ship on Friday?' "$(qs "$f" .text)" \
+    "the question text is the recorded ask"
+  assert_equals 'waiting|task|cp-4' "$(jq -r '.waiting | "\(.state)|\(.reason)|\(.question_id)"' "$f")" \
+    "an open ledger entry makes FirstMate wait on it"
+  [ "$(jq -r '[.questions[] | .since | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")] | all and (.questions[0].since == .waiting.since)' "$f")" = true ] \
+    || fail "each entry's add time must be its question's since, and the first one the wait's: $(cat "$f")"
+  [ "$(jq -r '[.questions[] | has("options")] | any' "$f")" = false ] || fail "no options may be invented"
+
+  run_pending "$home" add --kind other -- "Anything else" >/dev/null || fail "add other failed"
+  run_signals "$home" "" write || fail "write with five entries failed"
+  assert_equals 'cp-5,cp-4,cp-3,cp-2|other (+1 more waiting)' "$(qs "$f" .id)|$(jq -r .waiting.reason "$f")" \
+    "at most four questions, and the wait counts the live asks left out"
+
+  run_pending "$home" answer cp-5 --note "done" >/dev/null || fail "answer failed"
+  run_pending "$home" drop cp-4 --note "moot" >/dev/null || fail "drop failed"
+  run_signals "$home" "" write || fail "write after closing failed"
+  check "$f" "$home" "$pid" "closed-entries file"
+  assert_equals 'cp-3,cp-2,cp-1|command' "$(qs "$f" .id)|$(jq -r .waiting.reason "$f")" \
+    "answered and dropped entries leave the questions on the next write"
+  pass "open ledger entries of every kind are questions; closed ones are gone; more than four are counted"
+}
+
+test_ledger_overdue_replay_and_torn_line() {
+  local home pid f a b err
+  home=$(make_home ledger-order)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  run_pending "$home" add --kind command --due 2020-01-01 -- "Overdue command" >/dev/null || fail "add overdue failed"
+  run_pending "$home" add --kind question -- "Fresh question" >/dev/null || fail "add question failed"
+  a=$(run_pending "$home" add --kind approval --key merge-x -- "Approve merge" 2>/dev/null) || fail "keyed add failed"
+  b=$(run_pending "$home" add --kind approval --key merge-x -- "Approve merge again" 2>/dev/null) || fail "keyed replay failed"
+  assert_equals "$a" "$b" "a replayed key names the open entry"
+  run_signals "$home" "" write || fail "write failed"
+  check "$f" "$home" "$pid" "ordered ledger file"
+  assert_equals 'cp-1,cp-3,cp-2' "$(qs "$f" .id)" "overdue entries come first, then newest first, and a replayed key adds nothing"
+  assert_equals 'cp-1|command' "$(jq -r '.waiting | "\(.question_id)|\(.reason)"' "$f")" "the wait names the overdue entry"
+
+  printf '{"v":1,"event":"add","id":"cp-99","te' >> "$home/data/captain-pending.jsonl"
+  err=$(run_signals "$home" "" write 2>&1 >/dev/null) || fail "write failed on a torn ledger line: $err"
+  check "$f" "$home" "$pid" "torn-line file"
+  assert_equals 'cp-1,cp-3,cp-2' "$(qs "$f" .id)" "a torn ledger line hides no entry"
+  assert_contains "$err" "unreadable" "skipped ledger lines are reported on stderr"
+  pass "overdue entries lead, a replayed key adds nothing, and a torn line hides nothing"
+}
+
+test_ledger_with_holds_and_status() {
+  local home pid f today
+  home=$(make_home combined)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  today=$(date -u +%Y-%m-%d)
+  write_backlog "$home" "- [ ] parked-1 - Parked work (repo: sample) (since $today) (hold: captain said stop) (hold-kind: parked)"$'\n'
+  run_captain "$home" hold launch-q --title "App launch" --reason "Reuse or open new?" --repo sample >/dev/null \
+    || fail "fm-captain-hold.sh hold failed"
+  decision_task "$home" ship-a $'needs-decision [key=api]: choose API shape\nblocked [key=creds]: need a token'
+  run_pending "$home" add --kind question -- "Which logo?" >/dev/null || fail "add failed"
+  run_signals "$home" "" write || fail "write failed"
+  check "$f" "$home" "$pid" "combined file"
+  assert_equals 'cp-1,launch-q,ship-a' "$(jq -r '[.questions[].id] | sort | join(",")' "$f")" \
+    "a chat-only entry, a live hold, and a live status decision are questions; parked and blocked items are not"
+  assert_equals 'question|Which logo?' "$(jq -r '.questions[] | select(.id == "cp-1") | "\(.topic)|\(.text)"' "$f")" \
+    "the chat-only entry is published"
+  assert_equals 'hold · launch-q|App launch: Reuse or open new?|true' \
+    "$(jq -r '.questions[] | select(.id == "launch-q") | "\(.topic)|\(.text)|\(has("since"))"' "$f")" \
+    "the live hold is published with its hold-set time"
+  assert_equals 'status · ship-a|choose API shape|false' \
+    "$(jq -r '.questions[] | select(.id == "ship-a") | "\(.topic)|\(.text)|\(has("since"))"' "$f")" \
+    "the status decision is published without an invented time"
+  assert_equals ship-a "$(jq -r '.questions[-1].id' "$f")" "an item with no time sorts last"
+  pass "the ledger, live holds, and live status decisions are published from one combined view"
+}
+
+test_hostile_ledger_text() {
+  local home pid f text got
+  home=$(make_home ledger-hostile)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  text=$'Pick \e[31mred\e[0m\x01 or\r\nblue\e]0;t\a?\u202e'"$(printf 'ğ€%.0s' $(seq 1 1000))"
+  run_pending "$home" add --kind question --task odd.task-1 -- "$text" >/dev/null || fail "hostile add failed"
+  run_signals "$home" "" write 2>/dev/null || fail "write failed on hostile ledger text"
+  check "$f" "$home" "$pid" "hostile ledger file"
+  got=$(jq -r '.questions[0].text' "$f")
+  case "$got" in
+    $'Pick red or\nblue?ğ€ğ€'*…) ;;
+    *) fail "escapes, controls, and bidi overrides must be removed and CR LF kept as a line break: $got" ;;
+  esac
+  assert_equals 'question · odd.task-1' "$(jq -r '.questions[0].topic' "$f")" "the topic names the linked task"
+  pass "hostile ledger text is cleaned and cut to 2048 bytes on a rune boundary"
+}
+
+test_unavailable_snapshot_and_cache() {
+  local home pid f before rc err
+  home=$(make_home ledger-degraded)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  run_captain "$home" hold launch-q --title "App launch" --reason "Reuse?" --repo sample >/dev/null \
+    || fail "fm-captain-hold.sh hold failed"
+  run_signals "$home" "" write || fail "complete write failed"
+  assert_equals launch-q "$(qs "$f" .id)" "the live hold is published"
+
+  # While nothing the view reads has changed, a recent complete view is
+  # reused, so a snapshot that would now fail is not consulted.
+  FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=invalid run_signals "$home" "" write || fail "cached write failed"
+  check "$f" "$home" "$pid" "cached file"
+  assert_equals launch-q "$(qs "$f" .id)" "an unchanged home reuses its recent complete view"
+
+  # Once the backlog changes the view is read again; with the snapshot down
+  # and no ledger entry nothing reliable remains, so the previous file is
+  # left to age instead of claiming that nothing waits.
+  touch "$home/data/backlog.md"
+  before=$(cat "$f")
+  sleep 1.1
+  rc=0
+  err=$(FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=invalid run_signals "$home" "" write 2>&1 >/dev/null) || rc=$?
+  assert_not_equals 0 "$rc" "an incomplete view with nothing reliable must not publish"
+  assert_equals "$before" "$(cat "$f")" "the previous file is left to age"
+  assert_contains "$err" "unreadable" "the reason is reported on stderr"
+  rc=0
+  FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=invalid run_signals "$home" "" print >/dev/null 2>&1 || rc=$?
+  assert_not_equals 0 "$rc" "print refuses the same incomplete view"
+
+  # A ledger entry is still reliable: it is published alone, and the wait
+  # says the list is incomplete.
+  run_pending "$home" add --kind question -- "Chat ask" >/dev/null || fail "add failed"
+  FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=invalid run_signals "$home" "" write || fail "partial write failed"
+  check "$f" "$home" "$pid" "partial file"
+  assert_equals 'cp-1|question (holds and status decisions unreadable)' "$(qs "$f" .id)|$(jq -r .waiting.reason "$f")" \
+    "only the ledger entry is published, and the wait names what is missing"
+
+  # A complete view is cached again, and expires: once it is old, the
+  # snapshot is consulted even though nothing changed.
+  run_signals "$home" "" write || fail "recovered write failed"
+  assert_equals 'cp-1,launch-q' "$(jq -r '[.questions[].id] | sort | join(",")' "$f")" "a recovered snapshot publishes the hold again"
+  python3 -c 'import os, sys, time; t = time.time() - 120; os.utime(sys.argv[1], (t, t))' "$home/state/.console-signals-pending.json" \
+    || fail "the producer keeps no cached view"
+  FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=invalid run_signals "$home" "" write || fail "expired-cache write failed"
+  assert_equals cp-1 "$(qs "$f" .id)" "an expired cached view is not reused"
+  pass "an unavailable snapshot publishes only the ledger, never a false all-clear, and the cache is bounded"
 }
 
 # --- bots -------------------------------------------------------------------
@@ -520,12 +700,13 @@ while True:
 PY
   wait "$writer" 2>/dev/null || true
 
-  # Nothing outside state/console-signals.json changed, and no temp file stayed.
-  before=$(cd "$home" && find . -path ./state/console-signals.json -prune -o -type f -print0 | sort -z | xargs -0 cksum)
+  # Nothing outside the producer's own two files (the document and its cached
+  # captain-pending view) changed, and no temp file stayed.
+  before=$(cd "$home" && find . \( -path ./state/console-signals.json -o -path ./state/.console-signals-pending.json \) -prune -o -type f -print0 | sort -z | xargs -0 cksum)
   run_signals "$home" "" write || fail "containment write failed"
-  after=$(cd "$home" && find . -path ./state/console-signals.json -prune -o -type f -print0 | sort -z | xargs -0 cksum)
-  assert_equals "$before" "$after" "a write changes nothing but its own file"
-  assert_equals "" "$(find "$home/state" -name '*console-signals*' ! -name console-signals.json)" \
+  after=$(cd "$home" && find . \( -path ./state/console-signals.json -o -path ./state/.console-signals-pending.json \) -prune -o -type f -print0 | sort -z | xargs -0 cksum)
+  assert_equals "$before" "$after" "a write changes nothing but its own files"
+  assert_equals "" "$(find "$home/state" -name '*console-signals*' ! -name console-signals.json ! -name .console-signals-pending.json)" \
     "no temporary file remains in state/"
   pass "writes are atomic, refresh generated_at, and touch nothing else"
 }
@@ -594,6 +775,11 @@ test_empty_state
 test_live_hold_through_real_hold
 test_only_live_holds_newest_first_capped
 test_hostile_hold_content
+test_ledger_entries_of_each_kind
+test_ledger_overdue_replay_and_torn_line
+test_ledger_with_holds_and_status
+test_hostile_ledger_text
+test_unavailable_snapshot_and_cache
 test_bots_from_lister
 test_bot_cap_and_missing_lister
 test_atomic_fresh_and_contained
