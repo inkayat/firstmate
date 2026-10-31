@@ -108,6 +108,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- Captain inbox notes under `state/inbox/`, with their handled copies, replies, and the log of wake acknowledgements that named a still-pending note, `state/inbox/.ack-overrides.log` (`bin/fm-inbox.sh`, `bin/fm-wake-drain.sh`).
 - The opt-in console-signals file `state/console-signals.json` and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
