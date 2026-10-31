@@ -380,6 +380,31 @@ EOF
   return 1
 }
 
+# True on a main drain when a pending note has no `check inbox:<id>` row left
+# in the queue: its one wake was acknowledged anyway (the override, or a path
+# older than the guard) or never queued, so nothing else will surface it. Every
+# main drain then lists the inbox until the note is handled.
+orphaned_pending_note_exists() {
+  local LC_ALL=C note id queued nl=$'\n'
+  [ "$ACTOR" = main ] && [ -d "$INBOX_DIR" ] || return 1
+  queued=
+  [ ! -f "$FM_WAKE_QUEUE" ] \
+    || queued=$(awk -F '\t' '$3 == "check" && $4 ~ /^inbox:/ { print substr($4, 7) }' "$FM_WAKE_QUEUE" 2>/dev/null)
+  for note in "$INBOX_DIR"/*.note; do
+    id=${note##*/}
+    id=${id%.note}
+    note_is_pending "$id" || continue
+    case "$nl$queued$nl" in *"$nl$id$nl"*) ;; *) return 0 ;; esac
+  done
+  return 1
+}
+
+print_pending_notes_if_due() {  # [<presented-rows>]
+  if rows_carry_pending_note "${1:-}" || orphaned_pending_note_exists; then
+    print_pending_notes_section || true
+  fi
+}
+
 # PENDING CAPTAIN NOTES: every note still pending in the inbox, oldest first,
 # at most PENDING_NOTES_MAX of them, each as "<id> (saved <age> ago): <first
 # line>" with the line cleaned and capped by note_first_line. Silent when no
@@ -1206,6 +1231,7 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   esac
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
+  print_pending_notes_if_due
   (print_status_presentation) || true
   print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
   if [ "$RECOVERY_ACK_REQUIRED" = true ]; then
@@ -1228,6 +1254,7 @@ if [ "$ACTOR" = main ]; then
     print_branch_held_notice
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     DRAIN_LOCK_HELD=false
+    print_pending_notes_if_due
     (print_status_presentation) || true
     print_branch_outcomes_section || BRANCH_OUTCOMES_RC=1
     assert_watcher_liveness
@@ -1290,9 +1317,9 @@ fm_lock_release "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=false
 PENDING_NOTE_ACK_HINT=
 if rows_carry_pending_note "$RAW_ROWS"; then
-  print_pending_notes_section || true
   PENDING_NOTE_ACK_HINT=", and after every note under PENDING CAPTAIN NOTES is answered where owed and marked handled with bin/fm-inbox.sh drain --ack <id> (this acknowledgement is refused while one is still pending),"
 fi
+print_pending_notes_if_due "$RAW_ROWS"
 printf 'WAKE_ACK_REQUIRED: after handling completes%s run bin/fm-wake-drain.sh --ack-through %s --recovery-generation %s\n' \
   "$PENDING_NOTE_ACK_HINT" "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 

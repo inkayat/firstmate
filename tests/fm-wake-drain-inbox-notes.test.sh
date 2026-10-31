@@ -5,9 +5,9 @@
 # Pins three consumer-visible properties of bin/fm-wake-drain.sh over synthetic
 # homes built with the real bin/fm-inbox.sh: an --ack-through whose range holds
 # the `check inbox:<id>` wake of a still-pending note is refused with nothing
-# consumed; a drain that carries such a wake lists every pending note in a
-# bounded PENDING CAPTAIN NOTES block; and a home with no pending note sees
-# the drain exactly as before.
+# consumed; a drain that carries such a wake, or follows one acknowledged
+# anyway, lists every pending note in a bounded PENDING CAPTAIN NOTES block;
+# and a home with no pending note sees the drain exactly as before.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -275,6 +275,33 @@ test_range_without_note_wakes_acknowledges_as_before() {
   pass "an acknowledgement whose range holds no pending note's wake consumes exactly as before"
 }
 
+test_note_acknowledged_anyway_resurfaces_until_handled() {
+  local id ack seq gen
+  new_home resurface
+  id=$(queue_note "do not lose me")
+  ack=$(drain_to_files)
+  seq=${ack% *}; gen=${ack#* }
+  run_drain --ack-through "$seq" --recovery-generation "$gen" --allow-pending-notes "$id" 2>/dev/null \
+    || fail "setup: override acknowledgement failed"
+  [ ! -s "$HOME_DIR/state/.wake-queue" ] || fail "setup: the note wake is still queued"
+
+  run_drain > "$HOME_DIR/next.out" 2> "$HOME_DIR/next.err" || fail "the next drain failed"
+  grep -aq 'PENDING CAPTAIN NOTES' "$HOME_DIR/next.out" \
+    || fail "a pending note whose wake was acknowledged did not resurface: $(cat "$HOME_DIR/next.out")"
+  grep -aq "^$id .*do not lose me" "$HOME_DIR/next.out" || fail "the resurfaced block does not list the note"
+
+  append_wake "$HOME_DIR/state" heartbeat heartbeat heartbeat || fail "setup: heartbeat append failed"
+  run_drain > "$HOME_DIR/next2.out" 2>/dev/null || fail "the next queued drain failed"
+  grep -aq "^$id " "$HOME_DIR/next2.out" || fail "the note did not resurface on a drain with other wakes"
+
+  run_inbox drain --ack "$id" >/dev/null || fail "note acknowledgement failed"
+  run_drain > "$HOME_DIR/after.out" 2>/dev/null || fail "the drain after handling failed"
+  if grep -aq 'PENDING CAPTAIN NOTES' "$HOME_DIR/after.out"; then
+    fail "a handled note kept resurfacing"
+  fi
+  pass "a pending note whose wake was acknowledged anyway resurfaces at every drain until it is handled"
+}
+
 test_ack_refused_while_note_pending_then_accepted_after_handling
 test_vanished_unreadable_or_otherwise_handled_notes_do_not_block
 test_malformed_inbox_key_does_not_block
@@ -283,3 +310,4 @@ test_pending_block_lists_every_note_with_bounded_clean_text
 test_pending_block_with_nul_bytes_and_note_count_cap
 test_no_pending_note_leaves_drain_output_unchanged
 test_range_without_note_wakes_acknowledges_as_before
+test_note_acknowledged_anyway_resurfaces_until_handled
