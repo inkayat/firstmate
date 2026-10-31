@@ -3481,6 +3481,24 @@ lane_capacity_publish_detached() {
   LANE_CAPACITY_PID=$!
 }
 
+# Opt-in console signals (docs/configuration.md "Console signals"): publish
+# state/console-signals.json detached, for the same beacon-freshness reason as
+# the home summary above. bin/fm-console-signals.sh's header owns the document;
+# the last run's bounded diagnostics replace state/.console-signals.log.
+CONSOLE_SIGNALS_PID=
+console_signals_publish_detached() {
+  if [ -n "$CONSOLE_SIGNALS_PID" ]; then
+    if kill -0 "$CONSOLE_SIGNALS_PID" 2>/dev/null; then
+      return 0
+    fi
+    wait "$CONSOLE_SIGNALS_PID" 2>/dev/null || true
+    CONSOLE_SIGNALS_PID=
+  fi
+  FM_HOME=$FM_HOME "$SCRIPT_DIR/fm-console-signals.sh" write \
+    </dev/null >/dev/null 2>"$STATE/.console-signals.log" &
+  CONSOLE_SIGNALS_PID=$!
+}
+
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
   local request
@@ -3691,6 +3709,11 @@ while :; do
   # Opt-in lane capacity facts: off costs one file test.
   if [ -e "$CONFIG/lane-capacity" ] && [ "$(age_of "$STATE/lane-capacity.json")" -ge 30 ]; then
     lane_capacity_publish_detached
+  fi
+  # Opt-in console signals: off costs one file test. Every poll at the default
+  # cadence, so the published file stays well inside its 30-second heartbeat.
+  if [ -e "$CONFIG/console-signals" ] && [ "$(age_of "$STATE/console-signals.json")" -ge 10 ]; then
+    console_signals_publish_detached
   fi
 
   # Bearings publishes reconcile asks as local one-shot request files and
