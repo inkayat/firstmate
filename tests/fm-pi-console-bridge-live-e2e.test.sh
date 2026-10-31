@@ -11,9 +11,10 @@
 # the case's temp root and started with no configuration file, under a
 # scrubbed environment with scratch HOME, XDG
 # directories, Pi agent directory, session directory, project, and FM_HOME, so
-# no personal settings, credentials, sessions, or rc files are read. The pane's
-# shell writes its own pid as the session lock before starting Pi, making this
-# Pi the lock-owning primary of the scratch home.
+# no personal settings, credentials, sessions, or rc files are read. The
+# probe writes this Pi engine's own pid as the session lock during the first
+# nested round, as bin/fm-lock.sh records it, making this Pi the lock-owning
+# primary of the scratch home; it publishes on its next session start.
 set -u
 
 # shellcheck source=tests/lib.sh

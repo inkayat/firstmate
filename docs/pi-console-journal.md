@@ -110,6 +110,13 @@ Publishing a generation deletes only the journal that the replaced `current.json
 - A disk that stops answering stalls only the journal: the extension keeps at most one filesystem operation in flight, its memory stays bounded, and Pi's turns continue.
 - Shutdown waits at most 250 ms for the stop record and the `stopped` state.
 
+## Cost to the primary
+
+- The extension only listens to Pi's events: it adds no model call, prompt or context content, tool, command, or session entry, so what Pi sends to the model is the same with or without it.
+- Its handlers only queue records and one serial writer does the file work afterwards, so a reader sees streamed text up to one delta flush (200 ms or 4 KiB) after Pi shows it.
+- It starts one `bash` to ask the lock library about ownership when a session starts, and again only when the lock's content changes or while the lock names this process without the library confirming it; other run boundaries cost one small lock read.
+- The owner also starts one `bin/fm-operational-input.sh` per journalled user message; a session that does not own the lock journals and classifies nothing.
+
 ## Reader rules
 
 1. Read `current.json` (lstat, at most 64 KiB) and accept it only when `schema`, `harness`, `home`, and `lockPid` match what the reader expects for that home.
