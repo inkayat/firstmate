@@ -211,6 +211,21 @@ Firstmate's skills live in two separate places with different audiences:
   Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback, and curates tiered entries through decay, local archival, and user-approved on-demand offload proposals.
   It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
 
+## Console signals
+
+An external console such as Astro can show what firstmate is waiting on without inspecting firstmate itself.
+A home opts in with a local presence flag; while it exists, the live watcher has `bin/fm-console-signals.sh` publish `state/console-signals.json` (schema `fm-console-signals.v1`): whether firstmate waits on the captain and why, the open questions waiting on the captain, and the registered bots.
+The watcher refreshes it in the background at most every 10 seconds, so in practice about once per poll.
+The producer only publishes that file (plus its own cache and log under `state/`); it never touches the inbox, decisions, or agents, and the console only reads the file.
+
+```bash
+touch "$FM_HOME/config/console-signals"   # enable
+rm "$FM_HOME/config/console-signals"      # disable; the last file then goes stale
+```
+
+It is off by default, and because `config/` and `state/` are gitignored, each machine opts in on its own.
+Setup and refresh behavior live in [docs/configuration.md](docs/configuration.md#console-signals-configconsole-signals); the document's contents are owned by the [`bin/fm-console-signals.sh`](bin/fm-console-signals.sh) header.
+
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
