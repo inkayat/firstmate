@@ -109,7 +109,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-- The opt-in console-signals file `state/console-signals.json` and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
+- The opt-in console-signals file `state/console-signals.json`, its last complete captain-pending view `state/.console-signals-pending.json`, and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -750,8 +750,10 @@ The consumer's `docs/firstmate-console-signals.md` in that repository is the aut
 Create the flag with `touch "$FM_HOME/config/console-signals"`; remove it to stop publishing, and the last file then goes stale on its own.
 The flag is a home-local choice and is not inherited by secondmate homes.
 
-While the flag exists, the watcher runs `bin/fm-console-signals.sh write` detached at each poll once the file is at least 10 seconds old, so at the default 15-second poll it is rewritten about every 15 seconds and a new or answered captain hold shows within one poll.
-The questions come only from this home's live captain holds, and the bots only from the bot code's own `fm-bot list` and `show` output, never from chat or status prose.
+While the flag exists, the watcher runs `bin/fm-console-signals.sh write` detached at each poll once the file is at least 10 seconds old, so at the default 15-second poll it is rewritten about every 15 seconds and a new or answered ask shows within one poll.
+The questions and the wait come only from the [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl)'s combined view, `bin/fm-captain-pending.sh list --json`, so chat-only ledger entries appear beside live captain holds and live status decisions; the bots come only from the bot code's own `fm-bot list` and `show` output; neither reads chat or status prose.
+When that view's fleet snapshot is unavailable, only open ledger entries are published, marked incomplete, and with none open the previous file is left to age rather than claiming that nothing waits.
+A complete view is reused for up to 60 seconds while the files it reads are unchanged, which keeps an idle fleet from running it every poll.
 The file is written only while the home's session lock is held, carries that lock's pid, and is removed when the lock is free or stale.
 Publishing adds no model call, no network access, and no long-lived process: each run is one short local process the watcher never waits for, and a slow or failing run only leaves the previous file to age and its reasons in `state/.console-signals.log`.
 
@@ -2957,7 +2959,7 @@ FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this ho
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536
 FM_HOME_SUMMARY_FAILURE_REPORT=2   # recorded publication failures since the ledger's own last publication before session start reports a HOME_SUMMARY line; invalid or zero values use 2
-FM_CONSOLE_SIGNALS_TIMEOUT=20   # seconds bounding bin/fm-console-signals.sh's backlog read and, separately, all of its bot-lister calls together; values outside 1-300 use 20
+FM_CONSOLE_SIGNALS_TIMEOUT=20   # seconds bounding bin/fm-console-signals.sh's captain-pending view read and, separately, all of its bot reads together; values outside 1-300 use 20
 FM_CONFIG_ROOT=                 # a firstmate-config checkout whose bin/fm-bot bin/fm-console-signals.sh lists bots with; unset or without that file, an fm-bot on PATH is used, else no bots are published
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each local per-task current-state read inside bin/fm-fleet-snapshot.sh; remote endpoint liveness is not probed on the snapshot path
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8   # maximum local tasks whose current-state and endpoint observations are collected concurrently during snapshot composition
