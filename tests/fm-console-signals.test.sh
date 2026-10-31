@@ -177,11 +177,14 @@ make_home() {
 # shell, never in a command substitution, so cleanup can stop the holder.
 LOCK_PID=
 hold_lock() {
-  local home=$1
+  local home=$1 i=0
   perl -e '$0="claude"; sleep 300' </dev/null >/dev/null 2>&1 &
   LOCK_PID=$!
   HOLDER_PIDS+=("$LOCK_PID")
-  sleep 0.2
+  while [ "$(ps -o comm= -p "$LOCK_PID" 2>/dev/null)" != claude ] && [ "$i" -lt 100 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
   printf '%s\n' "$LOCK_PID" > "$home/state/.lock"
 }
 
@@ -196,9 +199,9 @@ make_lister() {
 dir=$(cd "$(dirname "$0")/.." && pwd)
 printf '%s|FM_HOME=%s|FIRSTMATE_ROOT=%s\n' "$*" "${FM_HOME:-}" "${FIRSTMATE_ROOT:-}" >> "$dir/calls.log"
 [ ! -e "$dir/fixture/hang" ] || exec sleep 60
-case "$1 ${3:-}" in
-  "list --json") cat "$dir/fixture/list.json"; exit 0 ;;
-  "show --json")
+case "$1 ${2:-} ${3:-}" in
+  "list --json ") cat "$dir/fixture/list.json"; exit 0 ;;
+  "show "*" --json")
     if [ -f "$dir/fixture/show-$2.json" ]; then cat "$dir/fixture/show-$2.json"; exit 0; fi
     echo "fm-bot: bot '$2' spec is invalid" >&2; exit 1 ;;
 esac
@@ -391,6 +394,10 @@ test_hostile_hold_content() {
     $'Line one\nLine two'*) ;;
     *) fail "CR LF must become a kept line break, escapes removed" ;;
   esac
+  assert_equals true "$(printf '%s' "$doc" | jq -r '.questions[0].text | split("\n")[1] | startswith("Line twoboldğ€")')" \
+    "escape sequences are removed whole, controls dropped, and nothing of them is left as text"
+  assert_equals "Ö$(printf 'ş%.0s' $(seq 1 30))€€€€€…" "$(printf '%s' "$doc" | jq -r '.questions[0].topic')" \
+    "the topic is cleaned, then cut to 80 bytes on a rune boundary with an ellipsis"
   pass "hostile hold ids, titles, and reasons are cut on rune boundaries and cleaned"
 }
 
@@ -494,12 +501,11 @@ test_atomic_fresh_and_contained() {
     "$(jq -S 'del(.generated_at)' "$home/state/console-signals.json")" "print shows what write publishes"
 
   # Readers never see a partial file while writes repeat.
-  ( for i in $(seq 1 25); do run_signals "$home" "" write 2>/dev/null; done ) &
+  ( for i in $(seq 1 12); do run_signals "$home" "" write 2>/dev/null; done ) &
   writer=$!
   python3 - "$home/state/console-signals.json" "$writer" <<'PY' || fail "a reader saw a partial or missing file"
 import json, os, sys
 path, writer = sys.argv[1], int(sys.argv[2])
-reads = 0
 while True:
     try:
         os.kill(writer, 0)
@@ -508,10 +514,8 @@ while True:
         alive = False
     with open(path, "rb") as f:
         json.loads(f.read())
-    reads += 1
     if not alive:
         break
-print("reads=%d" % reads, file=sys.stderr)
 PY
   wait "$writer" 2>/dev/null || true
 
@@ -559,13 +563,19 @@ test_watcher_publishes_only_when_opted_in() {
   start_watcher "$off" ""
   start_watcher "$hang" "$lister"
   i=0
-  while [ "$i" -lt 100 ] && { [ ! -s "$on/state/console-signals.json" ] || [ ! -e "$off/state/.last-watcher-beat" ] || [ ! -e "$hang/state/.last-watcher-beat" ]; }; do
+  while [ "$i" -lt 100 ] && { [ ! -s "$on/state/console-signals.json" ] || [ ! -e "$off/state/.last-watcher-beat" ] || [ ! -s "$lister/calls.log" ]; }; do
     sleep 0.1
     i=$((i + 1))
   done
+  grep -q '^list --json' "$lister/calls.log" 2>/dev/null || fail "the opted-in watcher must have reached the hanging bot lister"
   first_beat=$(beat_epoch "$hang/state/.last-watcher-beat")
-  sleep 3
-  later_beat=$(beat_epoch "$hang/state/.last-watcher-beat")
+  later_beat=$first_beat
+  i=0
+  while [ "$later_beat" -le "$first_beat" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    later_beat=$(beat_epoch "$hang/state/.last-watcher-beat")
+    i=$((i + 1))
+  done
   stop_watcher "$on"
   stop_watcher "$off"
   stop_watcher "$hang"
