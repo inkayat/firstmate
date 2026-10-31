@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Deterministic tests for the read-only Pi console journal extension
-# (.pi/extensions/fm-console-bridge.ts). Every case loads the real extension
-# through its default-export factory with a recording ExtensionAPI whose
-# sending, tool, command, and event-bus surfaces refuse every call, and drives
-# it with synthetic session managers and event payloads shaped like the ones
-# Pi 1.4.0's agent loop emits (extension handlers run before a finished
-# message joins the session). Ownership is answered by bin/fm-session-lock-lib.sh,
-# so every case runs Node under a Pi harness name (see PI_NODE below).
-# docs/pi-console-journal.md owns the contract.
+# Deterministic tests for the read-only console journal: the Pi extension
+# (.pi/extensions/fm-console-bridge.ts) and the omp extension that feeds it
+# omp's events (.omp/extensions/fm-console-bridge.ts). Every case loads the
+# real extension through its default-export factory with a recording
+# ExtensionAPI whose sending, tool, command, and event-bus surfaces refuse
+# every call, and drives it with synthetic session managers and event payloads
+# shaped like the ones Pi 1.4.0's agent loop emits (extension handlers run
+# before a finished message joins the session), or, for the omp cases, like
+# the ones omp 18.12.6 emits. Ownership is answered by
+# bin/fm-session-lock-lib.sh, so every case runs Node under a harness name (see
+# PI_NODE and OMP_NODE below). docs/pi-console-journal.md owns the contract.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -15,6 +17,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-pi-console-bridge)
 BRIDGE="$ROOT/.pi/extensions/fm-console-bridge.ts"
+OMP_BRIDGE="$ROOT/.omp/extensions/fm-console-bridge.ts"
 DRIVER="$TMP_ROOT/bridge-driver.mjs"
 # Node warns when a test-only dynamic import loads a tracked ESM extension from
 # a checkout with no package.json; the cases below require clean stderr.
@@ -56,9 +59,9 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // A fresh module instance per load, the way a Pi reload re-imports project
 // extensions; module-level state is therefore not shared between loads.
-export async function loadBridge() {
+export async function loadBridge(path = process.env.BRIDGE) {
   instances += 1;
-  const mod = await import(`${pathToFileURL(process.env.BRIDGE).href}?instance=${instances}`);
+  const mod = await import(`${pathToFileURL(path).href}?instance=${instances}`);
   const handlers = new Map();
   const forbidden = [];
   const refuse = (name) => () => {
@@ -181,6 +184,17 @@ export function contextFor(session, idle = () => true) {
   return { sessionManager: session.manager, isIdle: idle, hasUI: false, mode: "print", cwd: process.cwd() };
 }
 
+// omp's extension context: the interactive primary has a UI; an in-process
+// task subagent binds the same extension without one.
+export function ompContext(session, hasUI = true) {
+  return { sessionManager: session.manager, isIdle: () => true, hasUI, mode: hasUI ? "tui" : "print", cwd: process.cwd() };
+}
+
+// omp's run end: willContinue true while the session will start another loop.
+export function ompAgentEnd(bridge, ctx, messages, willContinue) {
+  return bridge.emit("agent_end", { messages, ...(willContinue ? { willContinue: true } : {}) }, ctx);
+}
+
 const usage = {
   input: 3,
   output: 5,
@@ -256,7 +270,10 @@ export async function assistantTurn(bridge, session, ctx, blocks, { extra = {}, 
 export async function toolRun(bridge, session, ctx, { id, name, args, result, isError = false, durationMs = 12 }) {
   await bridge.emit("tool_execution_start", { toolCallId: id, toolName: name, args }, ctx);
   await bridge.emit("tool_execution_update", { toolCallId: id, toolName: name, args, partialResult: result }, ctx);
-  await bridge.emit("tool_execution_end", { toolCallId: id, toolName: name, result, isError, durationMs }, ctx);
+  const end = { toolCallId: id, toolName: name, result, isError };
+  // omp's tool_execution_end carries no durationMs.
+  if (durationMs !== null) end.durationMs = durationMs;
+  await bridge.emit("tool_execution_end", end, ctx);
   const message = {
     role: "toolResult",
     toolCallId: id,
@@ -336,22 +353,28 @@ JS
 
 DRIVER_URL="file://$DRIVER"
 
-# Every case runs Node under the name `pi`, so the session-lock library sees
-# the extension host as a Pi harness process, as a real primary is; the kernel
-# records a symlink's own name as the process identity (fm_agent_standin in
-# tests/lib.sh). The runner's own harness session identity is cleared so it
-# cannot answer for these processes.
+# Every Pi case runs Node under the name `pi`, and every omp case under the name
+# `omp`, so the session-lock library sees the extension host as that harness's
+# process, as a real primary is; the kernel records a symlink's own name as the
+# process identity (fm_agent_standin in tests/lib.sh). The runner's own harness
+# session identity is cleared so it cannot answer for these processes.
 PI_NODE="$TMP_ROOT/harness-bin/pi"
+OMP_NODE="$TMP_ROOT/harness-bin/omp"
 mkdir -p "${PI_NODE%/*}"
 ln -s "$(command -v node)" "$PI_NODE"
+ln -s "$(command -v node)" "$OMP_NODE"
 
 run_node() {  # <home> [ENV=value...] ; script on stdin
   local home=$1
   shift
   env -u FM_STATE_OVERRIDE -u FM_ROOT_OVERRIDE -u FM_OPERATIONAL_INPUT_SCRIPT \
     -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
-    FM_HOME="$home" BRIDGE="$BRIDGE" DRIVER_URL="$DRIVER_URL" PI_NODE="$PI_NODE" "$@" \
-    "$PI_NODE" --input-type=module
+    FM_HOME="$home" BRIDGE="$BRIDGE" OMP_BRIDGE="$OMP_BRIDGE" DRIVER_URL="$DRIVER_URL" PI_NODE="$PI_NODE" "$@" \
+    "${HOST_NODE:-$PI_NODE}" --input-type=module
+}
+
+run_omp_node() {  # <home> [ENV=value...] ; script on stdin
+  HOST_NODE="$OMP_NODE" run_node "$@"
 }
 
 test_sessions_that_do_not_own_the_lock_write_nothing() {
@@ -1082,6 +1105,303 @@ JS
   pass "Pi console journal: an unusable journal path never throws into Pi or overwrites what occupies it, and the next settled run recovers"
 }
 
+test_omp_primary_journals_the_same_records() {
+  local home="$TMP_ROOT/omp-owner" out
+  mkdir -p "$home"
+  out=$(run_omp_node "$home" 2>&1 <<'JS'
+import { realpathSync } from "node:fs";
+const t = await import(process.env.DRIVER_URL);
+const home = process.env.FM_HOME;
+t.prepareHome(home);
+const session = t.createSession({ file: "/sessions/--home--/2026-10-31T16-00-00_omp-1.jsonl", id: "omp-1" });
+session.appendMessage(t.userMessage("OMP_PRIOR_CAPTAIN"));
+session.appendMessage(t.assistantMessage([{ type: "text", text: "OMP_PRIOR_ANSWER" }]));
+const bridge = await t.loadBridge(process.env.OMP_BRIDGE);
+const ctx = t.ompContext(session);
+// omp's session_start carries no reason.
+await bridge.emit("session_start", {}, ctx);
+const first = await t.waitFor(() => t.readCurrent(home).state === "live" && t.readCurrent(home), "the omp primary to publish");
+const snapshot = t.readJournal(home, first.gen)[0];
+t.assert(snapshot.type === "snapshot" && snapshot.reason === "startup", `snapshot was ${JSON.stringify(snapshot)}`);
+t.assert(JSON.stringify(snapshot.items.map((item) => [item.role, item.text])) === JSON.stringify([
+  ["captain", "OMP_PRIOR_CAPTAIN"], ["assistant", "OMP_PRIOR_ANSWER"],
+]), `snapshot items were ${JSON.stringify(snapshot.items)}`);
+
+await bridge.emit("agent_start", {}, ctx);
+await t.userTurn(bridge, session, ctx, "OMP_PROMPT");
+const answer = await t.assistantTurn(bridge, session, ctx, [
+  { type: "thinking", thinking: "OMP_THINKING_SECRET" },
+  { type: "text", text: "OMP streamed answer" },
+  { type: "toolCall", id: "call_omp", name: "read", arguments: { path: "OMP_ARG_SECRET" } },
+], { extra: { stopReason: "toolUse" } });
+await t.toolRun(bridge, session, ctx, { id: "call_omp", name: "read", args: { path: "OMP_ARG_SECRET" }, result: { content: [{ type: "text", text: "OMP_RESULT_SECRET" }], details: {} }, durationMs: null });
+const wrap = await t.assistantTurn(bridge, session, ctx, [{ type: "text", text: "OMP_WRAP" }]);
+// A loop omp will continue, such as a session_stop continuation, has not settled.
+await t.ompAgentEnd(bridge, ctx, [answer, wrap], true);
+await bridge.emit("agent_start", {}, ctx);
+const continued = await t.assistantTurn(bridge, session, ctx, [{ type: "text", text: "OMP_CONTINUED" }]);
+await t.ompAgentEnd(bridge, ctx, [continued], false);
+const records = await t.waitFor(() => {
+  const all = t.readJournal(home, first.gen);
+  return all[all.length - 1].type === "run" && all[all.length - 1].state === "settled" ? all : null;
+}, "the omp run to settle");
+const live = records.slice(1);
+const shape = live.filter((record) => record.type !== "delta").map((record) => {
+  if (record.type === "run") return `run:${record.state}`;
+  if (record.type === "tool") return `tool:${record.phase}:${record.name}`;
+  return `message:${record.phase}:${record.role}:${record.msg}`;
+});
+t.assert(JSON.stringify(shape) === JSON.stringify([
+  "run:started",
+  "message:end:captain:m1",
+  "message:start:assistant:m2",
+  "message:end:assistant:m2",
+  "tool:start:read",
+  "tool:end:read",
+  "message:start:assistant:m3",
+  "message:end:assistant:m3",
+  "message:start:assistant:m4",
+  "message:end:assistant:m4",
+  "run:settled",
+]), `omp live record order was ${JSON.stringify(shape)}`);
+t.assert(live.filter((r) => r.type === "delta" && r.msg === "m2").map((r) => r.text).join("") === "OMP streamed answer", "omp text deltas did not rebuild the text block");
+const toolEnd = live.find((r) => r.type === "tool" && r.phase === "end");
+t.assert(Number.isInteger(toolEnd.durationMs) && toolEnd.durationMs >= 0 && toolEnd.isError === false, `omp tool end was ${JSON.stringify(toolEnd)}`);
+t.assert(live.find((r) => r.type === "run" && r.state === "settled").aborted === false, "the omp run settled as aborted");
+
+await bridge.emit("agent_start", {}, ctx);
+const halted = await t.assistantTurn(bridge, session, ctx, [{ type: "text", text: "OMP_HALF" }], { extra: { stopReason: "aborted" } });
+await t.ompAgentEnd(bridge, ctx, [halted], false);
+const settled = await t.waitFor(() => {
+  const runs = t.readJournal(home, first.gen).filter((r) => r.type === "run" && r.state === "settled");
+  return runs.length === 2 ? runs : null;
+}, "the aborted omp run to settle");
+t.assert(settled[1].aborted === true, "an omp run that ended aborted did not settle as aborted");
+
+await bridge.emit("session_shutdown", {}, ctx);
+const stopped = await t.waitFor(() => t.readCurrent(home).state === "stopped" && t.readCurrent(home), "the omp shutdown");
+t.assert(stopped.stoppedReason === "unknown", `omp stop reason was ${stopped.stoppedReason}`);
+const all = t.readJournal(home, first.gen);
+t.assert(all[all.length - 1].type === "stopped" && all[all.length - 1].reason === "unknown", "the omp journal did not end with its stop");
+t.assert(stopped.harness === "pi" && stopped.home === realpathSync(home), "omp must publish the same harness and home identity");
+t.assert(stopped.lockPid === String(process.pid) && stopped.piPid === process.pid, "omp process identity was wrong");
+t.assert(stopped.startedReason === "startup" && stopped.sessionId === "omp-1" && stopped.conversation === "2026-10-31T16-00-00_omp-1.jsonl", `omp record was ${JSON.stringify(stopped)}`);
+const bytes = t.allBytes(home);
+for (const secret of ["OMP_THINKING_SECRET", "OMP_ARG_SECRET", "OMP_RESULT_SECRET"]) t.assert(!bytes.includes(secret), `${secret} reached disk`);
+t.assertClean(bridge, "omp owner");
+console.log("ok");
+JS
+  ) || fail "omp owner: $out"
+  [ "$out" = ok ] || fail "omp owner printed unexpected output: $out"
+  pass "console journal on omp: the lock-owning omp primary publishes the same records, settles only when omp will not continue, and stops on shutdown"
+}
+
+test_omp_subagent_sessions_never_touch_the_journal() {
+  local home="$TMP_ROOT/omp-subagent" out
+  mkdir -p "$home"
+  out=$(run_omp_node "$home" 2>&1 <<'JS'
+const t = await import(process.env.DRIVER_URL);
+const home = process.env.FM_HOME;
+t.prepareHome(home);
+const session = t.createSession({ file: "/sessions/primary.jsonl", id: "primary" });
+const primary = await t.loadBridge(process.env.OMP_BRIDGE);
+const pctx = t.ompContext(session);
+await primary.emit("session_start", {}, pctx);
+const current = await t.waitFor(() => t.readCurrent(home).state === "live" && t.readCurrent(home), "the omp primary to publish");
+await primary.emit("agent_start", {}, pctx);
+await t.userTurn(primary, session, pctx, "PRIMARY_PROMPT");
+
+// omp's task tool binds the same extension afresh, in this same process, for
+// a subagent session that has no UI.
+const sub = await t.loadBridge(process.env.OMP_BRIDGE);
+const subSession = t.createSession({ file: "/sessions/subagent.jsonl", id: "subagent" });
+subSession.appendMessage(t.userMessage("SUBAGENT_TASK_SECRET"));
+const sctx = t.ompContext(subSession, false);
+await sub.emit("session_start", {}, sctx);
+await t.sleep(300);
+await sub.emit("agent_start", {}, sctx);
+await t.sleep(300);
+await t.userTurn(sub, subSession, sctx, "SUBAGENT_PROMPT_SECRET");
+await t.assistantTurn(sub, subSession, sctx, [{ type: "text", text: "SUBAGENT_ANSWER_SECRET" }]);
+await t.ompAgentEnd(sub, sctx, [], false);
+await t.sleep(300);
+await sub.emit("session_shutdown", {}, sctx);
+await t.sleep(300);
+
+await t.assistantTurn(primary, session, pctx, [{ type: "text", text: "PRIMARY_ANSWER" }]);
+await t.ompAgentEnd(primary, pctx, [], false);
+const records = await t.waitFor(() => {
+  const all = t.readJournal(home, current.gen);
+  return all[all.length - 1].type === "run" && all[all.length - 1].state === "settled" ? all : null;
+}, "the primary run to settle");
+const after = t.readCurrent(home);
+t.assert(after.gen === current.gen && after.state === "live", `the subagent replaced the primary's record: ${JSON.stringify(after)}`);
+t.assert(JSON.stringify(t.journalNames(home)) === JSON.stringify([`${current.gen}.jsonl`, "current.json"].sort()), `unexpected files ${t.journalNames(home)}`);
+t.assert(!t.allBytes(home).includes("SUBAGENT"), "subagent text reached the journal");
+t.assert(records.some((r) => r.type === "message" && r.phase === "end" && r.text === "PRIMARY_ANSWER"), "the primary stopped journalling after the subagent ran");
+t.assertClean(primary, "omp primary");
+t.assertClean(sub, "omp subagent");
+console.log("ok");
+JS
+  ) || fail "omp subagent: $out"
+  [ "$out" = ok ] || fail "omp subagent printed unexpected output: $out"
+  pass "console journal on omp: an in-process subagent session without a UI never claims or writes the primary's journal"
+}
+
+test_omp_late_deltas_never_reopen_or_cross_messages() {
+  local home="$TMP_ROOT/omp-late-deltas" out
+  mkdir -p "$home"
+  out=$(run_omp_node "$home" 2>&1 <<'JS'
+const t = await import(process.env.DRIVER_URL);
+const home = process.env.FM_HOME;
+t.prepareHome(home);
+const session = t.createSession({ file: "/sessions/late.jsonl", id: "late" });
+const bridge = await t.loadBridge(process.env.OMP_BRIDGE);
+const ctx = t.ompContext(session);
+await bridge.emit("session_start", {}, ctx);
+const current = await t.waitFor(() => t.readCurrent(home).state === "live" && t.readCurrent(home), "the omp primary to publish");
+await bridge.emit("agent_start", {}, ctx);
+const delta = (timestamp, text) => bridge.emit("message_update", {
+  message: t.assistantMessage([{ type: "text", text }], { stopReason: "pending", timestamp }),
+  assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text },
+}, ctx);
+await bridge.emit("message_start", { message: t.assistantMessage([], { stopReason: "pending", timestamp: 1000 }) }, ctx);
+await delta(1000, "HEAD_");
+const endA = t.assistantMessage([{ type: "text", text: "HEAD_TAIL" }], { timestamp: 1000 });
+await bridge.emit("message_end", { message: endA }, ctx);
+session.appendMessage(endA);
+// omp hands message_update to extensions asynchronously, so an update can
+// trail its message's end, even into the next message's stream.
+await delta(1000, "LATE_TAIL");
+await bridge.emit("message_start", { message: t.assistantMessage([], { stopReason: "pending", timestamp: 2000 }) }, ctx);
+await delta(1000, "STALE_FROM_A");
+await delta(2000, "B_TEXT");
+const endB = t.assistantMessage([{ type: "text", text: "B_TEXT" }], { timestamp: 2000 });
+await bridge.emit("message_end", { message: endB }, ctx);
+session.appendMessage(endB);
+await t.ompAgentEnd(bridge, ctx, [endA, endB], false);
+const records = await t.waitFor(() => {
+  const all = t.readJournal(home, current.gen);
+  return all[all.length - 1].type === "run" && all[all.length - 1].state === "settled" ? all : null;
+}, "the run to settle");
+const live = records.slice(1);
+const shape = live.filter((record) => record.type !== "delta").map((record) => record.type === "run" ? `run:${record.state}` : `message:${record.phase}:${record.msg}`);
+t.assert(JSON.stringify(shape) === JSON.stringify([
+  "run:started", "message:start:m1", "message:end:m1", "message:start:m2", "message:end:m2", "run:settled",
+]), `late deltas changed the message structure: ${JSON.stringify(shape)}`);
+const text = (msg) => live.filter((r) => r.type === "delta" && r.msg === msg).map((r) => r.text).join("");
+t.assert(text("m1") === "HEAD_" && text("m2") === "B_TEXT", `deltas were m1=${text("m1")} m2=${text("m2")}`);
+t.assert(!t.allBytes(home).includes("LATE_TAIL") && !t.allBytes(home).includes("STALE_FROM_A"), "a trailing delta reached the journal");
+t.assertClean(bridge, "omp late deltas");
+console.log("ok");
+JS
+  ) || fail "omp late deltas: $out"
+  [ "$out" = ok ] || fail "omp late deltas printed unexpected output: $out"
+  pass "console journal on omp: a text delta omp delivers after its message ended neither reopens it nor joins the next message"
+}
+
+test_omp_agent_authored_user_messages_are_not_captain_input() {
+  local home="$TMP_ROOT/omp-agent-authored" out
+  mkdir -p "$home"
+  out=$(run_omp_node "$home" 2>&1 <<'JS'
+const t = await import(process.env.DRIVER_URL);
+const home = process.env.FM_HOME;
+t.prepareHome(home);
+const session = t.createSession({ file: "/sessions/authored.jsonl", id: "authored" });
+session.appendMessage(t.userMessage("D_CAPTAIN"));
+session.appendMessage({ ...t.userMessage("D_AGENT_SUMMARY_SECRET"), attribution: "agent", synthetic: true });
+session.appendMessage(t.assistantMessage([{ type: "text", text: "D_ANSWER" }]));
+const bridge = await t.loadBridge(process.env.OMP_BRIDGE);
+const ctx = t.ompContext(session);
+await bridge.emit("session_start", {}, ctx);
+const current = await t.waitFor(() => t.readCurrent(home).state === "live" && t.readCurrent(home), "the omp primary to publish");
+const snapshot = t.readJournal(home, current.gen)[0];
+t.assert(JSON.stringify(snapshot.items.map((item) => [item.role, item.text])) === JSON.stringify([
+  ["captain", "D_CAPTAIN"], ["assistant", "D_ANSWER"],
+]), `snapshot items were ${JSON.stringify(snapshot.items)}`);
+
+await bridge.emit("agent_start", {}, ctx);
+await t.userTurn(bridge, session, ctx, "D_PROMPT");
+const reply = await t.assistantTurn(bridge, session, ctx, [{ type: "text", text: "D_REPLY" }]);
+// omp's own note to the model, as a user-role message, is the run's last entry.
+const note = { ...t.userMessage("D_AGENT_NOTE_SECRET"), attribution: "agent" };
+await bridge.emit("message_start", { message: note }, ctx);
+await bridge.emit("message_end", { message: note }, ctx);
+session.appendMessage(note);
+await t.ompAgentEnd(bridge, ctx, [reply], false);
+await t.waitFor(() => t.readJournal(home, current.gen).some((r) => r.type === "run" && r.state === "settled"), "the run to settle");
+// That note is the leaf the next run starts from; it is not an unstreamed leaf change.
+await bridge.emit("agent_start", {}, ctx);
+await t.userTurn(bridge, session, ctx, "D_NEXT");
+await t.ompAgentEnd(bridge, ctx, [], false);
+const records = await t.waitFor(() => {
+  const all = t.readJournal(home, current.gen);
+  return all.filter((r) => r.type === "run" && r.state === "settled").length === 2 ? all : null;
+}, "the second run to settle");
+t.assert(t.readCurrent(home).gen === current.gen, "omp's own note opened a new generation");
+t.assert(JSON.stringify(t.journalNames(home)) === JSON.stringify([`${current.gen}.jsonl`, "current.json"].sort()), `unexpected files ${t.journalNames(home)}`);
+const users = records.filter((r) => r.type === "message" && r.phase === "end" && r.role !== "assistant").map((r) => `${r.role}:${r.text ?? r.opKind ?? ""}`);
+t.assert(JSON.stringify(users) === JSON.stringify(["captain:D_PROMPT", "captain:D_NEXT"]), `user records were ${JSON.stringify(users)}`);
+t.assert(!t.allBytes(home).includes("SECRET"), "an agent-authored user message reached the journal");
+t.assertClean(bridge, "omp agent-authored");
+console.log("ok");
+JS
+  ) || fail "omp agent-authored: $out"
+  [ "$out" = ok ] || fail "omp agent-authored printed unexpected output: $out"
+  pass "console journal on omp: user-role messages omp authors are neither captain text nor a leaf change, live or in a snapshot"
+}
+
+test_omp_activation_at_a_persisted_message_end_journals_it_once() {
+  local home="$TMP_ROOT/omp-persisted-end" out
+  mkdir -p "$home"
+  out=$(run_omp_node "$home" 2>&1 <<'JS'
+import { existsSync, writeFileSync } from "node:fs";
+const t = await import(process.env.DRIVER_URL);
+const home = process.env.FM_HOME;
+t.prepareHome(home, null);
+const session = t.createSession({ file: "/sessions/persisted.jsonl", id: "persisted" });
+session.appendMessage(t.userMessage("E_PRIOR"));
+const bridge = await t.loadBridge(process.env.OMP_BRIDGE);
+const ctx = t.ompContext(session);
+await bridge.emit("session_start", {}, ctx);
+await t.sleep(300);
+t.assert(!existsSync(t.journalDir(home)), "the journal started before the session held the lock");
+// The session takes the lock during its first run; the ownership answer
+// arrives while the assistant message streams.
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+await bridge.emit("agent_start", {}, ctx);
+await t.userTurn(bridge, session, ctx, "E_PROMPT");
+await bridge.emit("message_start", { message: t.assistantMessage([], { stopReason: "pending", timestamp: 5000 }) }, ctx);
+await bridge.emit("message_update", {
+  message: t.assistantMessage([{ type: "text", text: "E_" }], { stopReason: "pending", timestamp: 5000 }),
+  assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "E_" },
+}, ctx);
+await t.sleep(2000);
+t.assert(!existsSync(t.journalDir(home)), "fixture: the generation opened before the message ended");
+// omp may already have persisted the finished message when this extension's
+// message_end handler runs.
+const final = t.assistantMessage([{ type: "text", text: "E_FINAL_ANSWER" }], { timestamp: 5000 });
+session.appendMessage(final);
+await bridge.emit("message_end", { message: final }, ctx);
+await t.ompAgentEnd(bridge, ctx, [final], false);
+const current = await t.waitFor(() => t.readCurrent(home).state === "live" && t.readCurrent(home), "activation");
+const records = await t.waitFor(() => {
+  const all = t.readJournal(home, current.gen);
+  return all[all.length - 1].type === "run" && all[all.length - 1].state === "settled" ? all : null;
+}, "the run to settle");
+t.assert(current.startedReason === "activate", `activation reason was ${current.startedReason}`);
+t.assert(JSON.stringify(records[0].items.map((item) => item.text)) === JSON.stringify(["E_PRIOR", "E_PROMPT"]), `snapshot items were ${JSON.stringify(records[0].items)}`);
+const ends = records.filter((r) => r.type === "message" && r.phase === "end");
+t.assert(ends.length === 1 && ends[0].text === "E_FINAL_ANSWER", `fixture: the generation did not open at the message end: ${JSON.stringify(ends)}`);
+t.assert(t.allBytes(home).split("E_FINAL_ANSWER").length === 2, "the persisted message was journalled twice");
+t.assertClean(bridge, "omp persisted end");
+console.log("ok");
+JS
+  ) || fail "omp persisted end: $out"
+  [ "$out" = ok ] || fail "omp persisted end printed unexpected output: $out"
+  pass "console journal on omp: a generation that opens at a message end omp already persisted shows that message once"
+}
+
 test_sessions_that_do_not_own_the_lock_write_nothing
 test_a_pi_started_inside_the_primary_never_claims_the_journal
 test_lock_owner_publishes_snapshot_then_ordered_live_events
@@ -1092,3 +1412,8 @@ test_snapshot_and_records_stay_within_bounds
 test_generations_replace_without_stale_writes_or_overpruning
 test_backpressure_loses_honestly_and_size_cap_rotates
 test_io_failures_never_throw_and_recover_at_settle
+test_omp_primary_journals_the_same_records
+test_omp_subagent_sessions_never_touch_the_journal
+test_omp_late_deltas_never_reopen_or_cross_messages
+test_omp_agent_authored_user_messages_are_not_captain_input
+test_omp_activation_at_a_persisted_message_end_journals_it_once

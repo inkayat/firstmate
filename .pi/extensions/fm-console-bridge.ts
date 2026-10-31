@@ -5,6 +5,9 @@
 // docs/pi-console-journal.md owns the published contract: location, file
 // schemas, projection and privacy rules, bounds, generations, and reader rules.
 // This header owns how the extension keeps that contract (stated once here).
+// The omp primary runs this same factory through
+// .omp/extensions/fm-console-bridge.ts, whose header owns how omp's events are
+// translated.
 //
 // Ownership. Only the Pi process whose own session owns this home's session
 // lock journals. bin/fm-session-lock-lib.sh's fm_session_lock_owned_by_self is

@@ -38,6 +38,11 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visib
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$TMP_ROOT/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/lib/fm-operational-input.ts"
+# The omp console journal extension imports the Pi one from ../../.pi/extensions/,
+# so give it that layout over the same copies.
+mkdir -p "$TMP_ROOT/omp/extensions" "$TMP_ROOT/.pi"
+ln -s .. "$TMP_ROOT/.pi/extensions"
+cp "$ROOT/.omp/extensions/fm-console-bridge.ts" "$TMP_ROOT/omp/extensions/fm-console-bridge.ts"
 cat > "$TMP_ROOT/package.json" <<'JSON'
 {"type":"module"}
 JSON
@@ -53,7 +58,7 @@ cat > "$TMP_ROOT/tsconfig.json" <<'JSON'
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["*.ts", "lib/*.ts"]
+  "include": ["*.ts", "lib/*.ts", "omp/extensions/*.ts"]
 }
 JSON
 

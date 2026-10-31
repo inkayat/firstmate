@@ -1651,6 +1651,12 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
+    .omp/extensions/fm-console-bridge.ts)
+      # The omp feed of the console journal: the journal suite, whose omp cases
+      # load it, and the Pi typecheck, which includes it.
+      printf '%s\n' __script__:fm-pi-console-bridge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      ;;
     .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\
     .pi/extensions/lib/fm-calm-working-ship-sprite.ts)
       # The Claude Code Calm mod and the sprite core it shares with the Pi Calm
