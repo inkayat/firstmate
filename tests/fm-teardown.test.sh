@@ -1039,6 +1039,62 @@ test_squash_merged_pr_allows_replayed_unpushed_patch() {
   pass "squash-merged PR accepts replayed unpushed local patches contained in the PR head"
 }
 
+test_merged_pr_patch_matching_preserves_indentation() {
+  local case_dir mode rc pr_head local_head expected
+  for mode in exact amended old-git; do
+    case_dir=$(make_case "pr-indentation-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    # A pushed parent makes the YAML patch the only unpushed commit, while
+    # giving the local replay a different parent from the recorded PR head.
+    wt_commit_file "$case_dir" local-parent.txt parent "local parent"
+    git -C "$case_dir/wt" push -q origin HEAD:refs/heads/fm/task-x1
+    git -C "$case_dir/project" fetch -q origin fm/task-x1
+    wt_commit_file "$case_dir" config.yml $'a:\n  b: 1' "add YAML"
+    append_pr_meta_url "$case_dir"
+    pr_head=$(land_equivalent_patch_on_origin_branch "$case_dir" pr-head config.yml $'a:\n  b: 1' "add YAML")
+    printf 'pr_head=%s\n' "$pr_head" >> "$case_dir/state/task-x1.meta"
+    add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+    if [ "$mode" = amended ]; then
+      printf 'a:\nb: 1\n' > "$case_dir/wt/config.yml"
+      git -C "$case_dir/wt" add -- config.yml
+      git -C "$case_dir/wt" commit -q --amend --no-edit
+    elif [ "$mode" = old-git ]; then
+      cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = patch-id ]; then
+  printf '%s\n' "$*" >> "$FM_PATCH_ID_LOG"
+  if [ "${2:-}" = --verbatim ]; then
+    echo 'error: unknown option `verbatim`' >&2
+    exit 129
+  fi
+fi
+exec "$REAL_GIT_FOR_TEST" "$@"
+SH
+      chmod +x "$case_dir/fakebin/git"
+    fi
+    local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    [ "$local_head" != "$pr_head" ] || fail "$mode: fixture did not diverge"
+
+    set +e
+    FM_PATCH_ID_LOG="$case_dir/patch-id.log" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    expected=1
+    [ "$mode" != exact ] || expected=0
+    expect_code "$expected" "$rc" "pr-indentation-$mode: teardown exit"$'\n'"$(cat "$case_dir/stderr")"
+    if [ "$expected" = 1 ]; then
+      assert_grep REFUSED "$case_dir/stderr" "$mode: no refusal diagnostic"
+      assert_refusal_retained_task_state "$case_dir" "$mode" "$local_head"
+    fi
+    if [ "$mode" = old-git ]; then
+      assert_grep 'patch-id --verbatim' "$case_dir/patch-id.log" "old-git: capability rejection was not exercised"
+      ! grep -q -- --stable "$case_dir/patch-id.log" || fail "old-git: fell back to whitespace-insensitive matching"
+    fi
+  done
+  pass "merged PR patch matching preserves indentation, allows exact replays, and refuses unsupported Git"
+}
+
 test_merged_pr_with_later_local_commit_refuses() {
   local case_dir rc pr_head
   case_dir=$(make_case stale-pr-head)
@@ -1262,6 +1318,90 @@ test_pr_check_records_remote_head_when_local_lags() {
   pass "fm-pr-check records the remote PR head when the local worktree lags"
 }
 
+# Exercise Git's capability/error boundary through the real teardown entry point.
+# Only merge-tree is intercepted; history, fetches, and preservation checks are real.
+test_content_fallback_git_capability_boundary() {
+  local mode case_dir rc head
+  for mode in unsupported contained conflict unlanded error; do
+    case_dir=$(make_case "content-git-$mode")
+    write_meta "$case_dir" no-mistakes ship
+    wt_commit_file "$case_dir" feature.txt hello "add feature"
+    case "$mode" in
+      conflict) land_on_origin_main "$case_dir" feature.txt different ;;
+      unlanded) ;;
+      *) land_on_origin_main "$case_dir" feature.txt hello ;;
+    esac
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+args=("$@")
+if [ "${1:-}" = -C ]; then shift 2; fi
+if [ "${1:-}" = merge-tree ]; then
+  printf '%s\n' "$*" >> "${FM_TEST_MERGE_TREE_LOG:?}"
+  case "${FM_TEST_MERGE_TREE_MODE:?}" in
+    unsupported)
+      echo "error: unknown option 'write-tree'" >&2
+      exit 129 ;;
+    error)
+      echo 'fatal: unable to read tree object' >&2
+      exit 128 ;;
+  esac
+fi
+exec "$REAL_GIT_FOR_TEST" "${args[@]}"
+SH
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_TEST_TREEHOUSE_LOG:?}"
+exit 0
+SH
+    chmod +x "$case_dir/fakebin/git" "$case_dir/fakebin/treehouse"
+
+    set +e
+    FM_TEST_MERGE_TREE_MODE="$mode" \
+      FM_TEST_MERGE_TREE_LOG="$case_dir/merge-tree.log" \
+      FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+      run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+    rc=$?
+    set -e
+
+    grep -q -- 'merge-tree --write-tree' "$case_dir/merge-tree.log" \
+      || fail "content-git-$mode: never attempted the containment proof"
+    if [ "$mode" = contained ]; then
+      expect_code 0 "$rc" "content-git-contained: supported containment should allow cleanup"
+      assert_present "$case_dir/treehouse.log" "content-git-contained: cleanup never ran"
+      assert_absent "$case_dir/state/task-x1.meta" "content-git-contained: task record survived cleanup"
+      continue
+    fi
+    expect_code 1 "$rc" "content-git-$mode: teardown must refuse"
+    assert_refusal_retained_task_state "$case_dir" "content-git-$mode" "$head"
+    assert_absent "$case_dir/treehouse.log" "content-git-$mode: cleanup ran despite refusal"
+    case "$mode" in
+      unsupported|error)
+        grep -q 'content-landed proof unavailable' "$case_dir/stderr" \
+          || fail "content-git-$mode: unavailable proof was reported as unlanded work"
+        ! grep -q 'not landed' "$case_dir/stderr" \
+          || fail "content-git-$mode: unavailable proof still claims work is not landed"
+        if [ "$mode" = unsupported ]; then
+          grep -q -- 'merge-tree --write-tree.*Git 2.38' "$case_dir/stderr" \
+            || fail 'content-git-unsupported: missing capability and Git requirement were not named'
+        else
+          grep -q 'Git exit 128' "$case_dir/stderr" \
+            || fail 'content-git-error: unrelated Git failure was not identified'
+          ! grep -q 'Git 2.38' "$case_dir/stderr" \
+            || fail 'content-git-error: unrelated failure was mislabeled as old Git'
+        fi
+        ;;
+      *)
+        grep -q 'not landed' "$case_dir/stderr" \
+          || fail "content-git-$mode: genuine unlanded-work refusal changed"
+        ! grep -q 'proof unavailable' "$case_dir/stderr" \
+          || fail "content-git-$mode: supported Git was reported as unavailable"
+        ;;
+    esac
+  done
+  pass 'content fallback distinguishes unavailable Git proof, containment, conflicts, and unlanded content'
+}
+
 test_content_in_default_fallback_allows() {
   local case_dir rc
   case_dir=$(make_case content-landed)
@@ -1381,6 +1521,50 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+test_hidden_untracked_work_refuses_before_return() {
+  local case_dir rc head state
+  for state in dirty clean; do
+    case_dir=$(make_case "hidden-untracked-$state")
+    write_meta "$case_dir" no-mistakes ship
+    git -C "$case_dir/wt" config status.showUntrackedFiles no
+    head=$(git -C "$case_dir/wt" rev-parse HEAD)
+    cp "$case_dir/state/task-x1.meta" "$case_dir/meta-before"
+    cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = return ]; then
+  printf '%s\n' return >> "$FM_STATE_OVERRIDE/returned"
+fi
+exit 0
+SH
+    if [ "$state" = dirty ]; then
+      mkdir "$case_dir/wt/new directory"
+      printf '%s\n' 'unadded work' > "$case_dir/wt/new directory/newfile.txt"
+      [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+        || fail "hidden-untracked: fixture did not hide the unadded file"
+    fi
+
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$state" = dirty ]; then
+      expect_code 1 "$rc" "hidden-untracked: teardown must refuse hidden unadded work"
+      assert_grep 'REFUSED: worktree' "$case_dir/stderr" "hidden-untracked: no refusal"
+      assert_grep 'uncommitted changes' "$case_dir/stderr" "hidden-untracked: no dirty-state diagnostic"
+      assert_grep 'new directory/newfile.txt' "$case_dir/stderr" "hidden-untracked: unadded path not named"
+      assert_absent "$case_dir/state/returned" "hidden-untracked: pool return ran before refusal"
+      assert_refusal_retained_task_state "$case_dir" hidden-untracked "$head"
+      cmp -s "$case_dir/meta-before" "$case_dir/state/task-x1.meta" \
+        || fail "hidden-untracked: refusal changed task metadata"
+      [ "$(cat "$case_dir/wt/new directory/newfile.txt")" = 'unadded work' ] \
+        || fail "hidden-untracked: refusal changed or erased unadded work"
+    else
+      expect_code 0 "$rc" "hidden-untracked: clean control should complete teardown"
+      assert_grep 'return' "$case_dir/state/returned" "hidden-untracked: clean control never reached pool return"
+      assert_absent "$case_dir/state/task-x1.meta" "hidden-untracked: clean control kept task metadata"
+    fi
+  done
+  pass "hidden untracked work is refused before return while a clean control returns"
 }
 
 assert_dirty_diagnostic() {
@@ -5326,6 +5510,164 @@ test_status_archive_opt_in() {
   pass "status archival is opt-in and preserves the complete log"
 }
 
+test_record_export_config_absent_never_reads_the_exporter() {
+  local case_dir rc=0
+  case_dir=$(make_case record-export-off)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-record-export.sh"
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'pending\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  run_copied_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "config-absent teardown without exporter: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "config-absent teardown retained metadata"
+  assert_absent "$case_dir/state/task-x1.status" "config-absent teardown retained status"
+  assert_absent "$case_dir/state/task-x1.inbox" "config-absent teardown retained inbox"
+  pass "config-absent teardown does not read or invoke record export"
+}
+
+test_record_export_unopted_symlinked_config_does_not_block_teardown() {
+  local case_dir rc=0
+  case_dir=$(make_case record-export-symlink-config-off)
+  write_meta "$case_dir" local-only ship
+  prepare_teardown_source_copy "$case_dir"
+  rm -f "$case_dir/test-root/bin/fm-record-export.sh"
+  mv "$case_dir/config" "$case_dir/config-target"
+  ln -s "$case_dir/config-target" "$case_dir/config"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "unopted symlinked config teardown: $(cat "$case_dir/stderr")"
+  assert_absent "$case_dir/state/task-x1.meta" "unopted symlinked config retained metadata"
+  assert_absent "$case_dir/state/task-x1.status" "unopted symlinked config retained status"
+  pass "unopted teardown ignores symlinked config when record export is absent"
+}
+
+test_record_export_archives_before_teardown_or_preserves_sources_on_failure() {
+  local case_dir export_root archive rc mode
+  for mode in success failure inaccessible-config; do
+    case_dir=$(make_case "record-export-$mode")
+    write_meta "$case_dir" local-only ship
+    export_root="$case_dir/export"
+    printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+    mkdir -p "$case_dir/state/task-x1.inbox/handled"
+    printf 'working: export me\ndone: complete\n' > "$case_dir/state/task-x1.status"
+    printf 'pending captain text\n' > "$case_dir/state/task-x1.inbox/001.msg"
+    printf 'handled captain text\n' > "$case_dir/state/task-x1.inbox/handled/002.msg"
+    cp "$case_dir/state/task-x1.meta" "$case_dir/expected.meta"
+    cp "$case_dir/state/task-x1.status" "$case_dir/expected.status"
+    if [ "$mode" = failure ]; then
+      printf 'not an export directory\n' > "$export_root"
+    elif [ "$mode" = inaccessible-config ]; then
+      mv "$case_dir/config" "$case_dir/config-target"
+      ln -s "$case_dir/config-target" "$case_dir/config"
+    fi
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    if [ "$mode" = success ]; then
+      expect_code 0 "$rc" "record export teardown: $(cat "$case_dir/stderr")"
+      archive="$export_root/archive/task-x1/teardown-test-task-x1"
+      cmp -s "$case_dir/expected.meta" "$archive/meta" || fail "teardown archive lost metadata"
+      cmp -s "$case_dir/expected.status" "$archive/status" || fail "teardown archive lost status"
+      assert_grep 'pending captain text' "$archive/inbox/001.msg" "teardown archive lost a pending steer"
+      assert_grep 'handled captain text' "$archive/inbox/handled/002.msg" "teardown archive lost a handled steer"
+      assert_present "$archive/manifest.v1.json" "teardown archive did not commit its manifest"
+      assert_absent "$case_dir/state/task-x1.meta" "successful export retained metadata"
+      assert_absent "$case_dir/state/task-x1.status" "successful export retained status"
+      assert_absent "$case_dir/state/task-x1.inbox" "successful export retained inbox"
+    else
+      [ "$rc" -ne 0 ] || fail "teardown ignored a record export failure in $mode mode: $(cat "$case_dir/stderr")"
+      assert_grep 'record export' "$case_dir/stderr" \
+        "teardown did not report the export failure reason"
+      assert_grep 'retaining task records for retry' "$case_dir/stderr" \
+        "teardown did not explain its record-preservation refusal"
+      assert_present "$case_dir/state/task-x1.meta" "failed export removed metadata"
+      assert_present "$case_dir/state/task-x1.status" "failed export removed status"
+      assert_present "$case_dir/state/task-x1.inbox/001.msg" "failed export removed a pending steer"
+      assert_present "$case_dir/state/task-x1.inbox/handled/002.msg" "failed export removed a handled steer"
+    fi
+  done
+  pass "teardown commits the record archive before deleting sources and fails closed when export cannot commit"
+}
+
+test_record_export_captures_forced_secondmate_sub_state() {
+  local case_dir home export_root archive rc=0
+  case_dir=$(make_case record-export-secondmate-child)
+  write_meta "$case_dir" local-only secondmate
+  home="$case_dir/secondmate-home"
+  export_root="$case_dir/export"
+  mkdir -p "$home/state/child.inbox/handled" "$home/data" "$home/config" "$home/projects"
+  printf 'task-x1\n' > "$home/.fm-secondmate-home"
+  printf 'home=%s\n' "$home" >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$home/state/child.meta" \
+    "window=firstmate:fm-child" \
+    "kind=scout" \
+    "mode=local-only" \
+    "project=$case_dir/project" \
+    "worktree=$case_dir/wt" \
+    "spawn_gen=child-generation"
+  printf 'done: child complete\n' > "$home/state/child.status"
+  printf 'pending child steer\n' > "$home/state/child.inbox/001.msg"
+  printf 'handled child steer\n' > "$home/state/child.inbox/handled/002.msg"
+  printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "forced secondmate record export: $(cat "$case_dir/stderr")"
+  archive="$export_root/archive/child/child-generation"
+  assert_present "$archive/meta" "secondmate child archive lost metadata"
+  assert_grep 'done: child complete' "$archive/status" "secondmate child archive lost status"
+  assert_grep 'pending child steer' "$archive/inbox/001.msg" "secondmate child archive lost pending inbox"
+  assert_grep 'handled child steer' "$archive/inbox/handled/002.msg" "secondmate child archive lost handled inbox"
+  assert_present "$archive/manifest.v1.json" "secondmate child archive did not commit"
+  assert_absent "$home" "forced secondmate teardown retained the child home"
+  pass "forced secondmate teardown exports task records from the child sub-state"
+}
+
+test_record_export_waits_for_endpoint_quiescence_before_archiving() {
+  local case_dir export_root archive rc=0
+  case_dir=$(make_case record-export-close-retry)
+  write_meta "$case_dir" local-only ship
+  export_root="$case_dir/export"
+  printf '%s\n' "$export_root" > "$case_dir/config/record-export-root"
+  mkdir -p "$case_dir/state/task-x1.inbox/handled"
+  printf 'done: before refusal\n' > "$case_dir/state/task-x1.status"
+  printf 'before refusal\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  kill-window) exit 1 ;;
+  list-windows) printf '%s\n' fm-task-x1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+
+  run_teardown "$case_dir" > "$case_dir/first.stdout" 2> "$case_dir/first.stderr" || rc=$?
+  expect_code 1 "$rc" "record-export-close-retry: endpoint close should refuse"
+  assert_grep "could not be closed" "$case_dir/first.stderr" \
+    "record-export-close-retry: first attempt did not reach endpoint refusal"
+  assert_absent "$export_root/archive/task-x1/teardown-test-task-x1" \
+    "record-export-close-retry: archive published while the endpoint remained live"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "record-export-close-retry: endpoint refusal removed metadata"
+
+  printf 'done: after refusal\n' > "$case_dir/state/task-x1.status"
+  printf 'after refusal\n' > "$case_dir/state/task-x1.inbox/001.msg"
+  cat > "$case_dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/tmux"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  expect_code 0 "$rc" "record-export-close-retry: retry should complete"
+  archive="$export_root/archive/task-x1/teardown-test-task-x1"
+  assert_grep "done: after refusal" "$archive/status" \
+    "record-export-close-retry: retry archive contains status from before endpoint quiescence"
+  assert_grep "after refusal" "$archive/inbox/001.msg" \
+    "record-export-close-retry: retry archive contains inbox from before endpoint quiescence"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "record-export-close-retry: successful retry retained task metadata"
+  pass "record export waits for endpoint quiescence and retry captures records changed after refusal"
+}
+
 test_status_archive_reuse_and_retention() {
   local case_dir rc archive
   case_dir=$(make_case status-archive-reuse)
@@ -5603,7 +5945,14 @@ test_status_archive_nested_secondmate_children() {
   pass "forced secondmate retirement preserves two descendant levels and refuses linked child directories"
 }
 
+test_hidden_untracked_work_refuses_before_return
+test_content_fallback_git_capability_boundary
 test_status_archive_opt_in
+test_record_export_config_absent_never_reads_the_exporter
+test_record_export_unopted_symlinked_config_does_not_block_teardown
+test_record_export_archives_before_teardown_or_preserves_sources_on_failure
+test_record_export_captures_forced_secondmate_sub_state
+test_record_export_waits_for_endpoint_quiescence_before_archiving
 test_status_archive_nested_secondmate_children
 test_status_archive_missing_status_noop
 test_status_archive_reuse_and_retention
@@ -5658,6 +6007,7 @@ test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
 test_squash_merged_pr_allows_replayed_unpushed_patch
+test_merged_pr_patch_matching_preserves_indentation
 test_merged_pr_with_later_local_commit_refuses
 test_squash_merged_rebased_branch_allows
 test_squash_merged_forgejo_pr_allows_when_main_moved_on
