@@ -193,3 +193,22 @@ assert_equals "false" "$(field "$out" '.fleet.available')" "an unavailable snaps
 assert_equals "0" "$(field "$out" '[.waiting_on_captain[] | select(.source != "ledger")] | length')" \
   "non-ledger items listed without a snapshot"
 pass "an unavailable snapshot still lists the ledger and exits incomplete"
+
+# --- a captain hold's creation time --------------------------------------------
+home=$(make_home hold-time)
+cat > "$home/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+## Queued
+- [ ] timed - Timed call (repo: alpha) (since 2026-10-30) (hold: pick one) (hold-kind: captain)
+  Captain hold set: 2026-10-30T09:15:00Z
+- [ ] dated - Date-only call (repo: alpha) (since 2026-10-29) (hold: pick two) (hold-kind: captain)
+## Done
+EOF
+view=$(pending "$home" list --json) || fail "hold-time list failed"
+assert_equals "2026-10-30T09:15:00Z" "$(field "$(item "$view" waiting_on_captain timed)" '.created')" \
+  "a hold with a recorded hold-set time is created then"
+assert_equals "2026-10-29" "$(field "$(item "$view" waiting_on_captain dated)" '.created')" \
+  "a hold without a hold-set time keeps its since date"
+pass "a captain hold is created at its hold-set time when one is recorded"

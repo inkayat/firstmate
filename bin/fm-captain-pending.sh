@@ -77,7 +77,9 @@
 # counts {live,waiting_on_captain,paused_by_captain_order,paused_other_reason},
 # and one array per section. Each item carries id, source, kind, key, task_id,
 # age_seconds, age (rendered; whole days when only a hold date is known),
-# task_state, label, live, text, due, and created.
+# task_state, label, live, text, due, and created (a ledger entry's add time;
+# a hold's recorded hold-set time, else its since date; null for a status
+# decision).
 #
 # Exit codes: 0 success; 1 refused or failed; 2 usage. `list` exits 3 when the
 # snapshot was unavailable: the ledger section is still printed, the output
@@ -363,12 +365,15 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
          age_seconds:$age.seconds, age:$age.text, task_state:task_state($task_id),
          label:$label, live:$live, text:$text, due:$due, created:$created};
       def hold_text: (.title // .id) + (if .hold_reason then ": " + .hold_reason else "" end);
-      # A hold-set stamp with a time gives an exact age; a date-only stamp or
-      # the since date gives the snapshot hold_age_days, shown in whole days.
+      def timed_hold: (.hold_set // "") | test("T");
+      # A hold-set stamp with a time gives an exact age and creation time; a
+      # date-only stamp or the since date gives the snapshot hold_age_days,
+      # shown in whole days, and the since date as the creation.
       def hold_age:
-        if ((.hold_set // "") | test("T")) then age_of($now - (.hold_set | fromdateiso8601))
+        if timed_hold then age_of($now - (.hold_set | fromdateiso8601))
         elif .hold_age_days == null then age_of(null)
         else {seconds:(.hold_age_days * 86400), text:"\(.hold_age_days)d"} end;
+      def hold_created: if timed_hold then .hold_set else .since end;
 
     ([ $ledger.entries[] | select(.status == "open")
        | item("ledger"; .kind; .key; .task;
@@ -378,32 +383,33 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
 
     | ([ $rows[] | select(held)
          | (.hold_kind // "held") as $hk
+         | hold_created as $created
          | if $hk == "captain" then
              if .hold_bucket == "blocked" then
                {section:"other", v:item("backlog"; $hk; null; .id; hold_age;
-                 "blocked-by " + (.unresolved_blocker_ids | join(",")); false; hold_text; null; .since)}
+                 "blocked-by " + (.unresolved_blocker_ids | join(",")); false; hold_text; null; $created)}
              elif expired then
                {section:"waiting", v:item("backlog"; $hk; null; .id; hold_age;
-                 "expired " + .hold_until; false; hold_text; null; .since)}
+                 "expired " + .hold_until; false; hold_text; null; $created)}
              elif .hold_bucket == "dated" then
                {section:"order", v:item("backlog"; $hk; null; .id; hold_age;
-                 "until " + .hold_until; false; hold_text; null; .since)}
+                 "until " + .hold_until; false; hold_text; null; $created)}
              elif .hold_bucket == "aged" then
                {section:"waiting", v:item("backlog"; $hk; null; .id; hold_age;
-                 "aged"; false; hold_text; null; .since)}
+                 "aged"; false; hold_text; null; $created)}
              else
                {section:"waiting", v:item("backlog"; $hk; null; .id; hold_age;
-                 "live"; true; hold_text; null; .since)}
+                 "live"; true; hold_text; null; $created)}
              end
            elif $hk == "parked" then
              {section:"order", v:item("backlog"; $hk; null; .id; hold_age;
                (if expired then "expired " + .hold_until
                 elif .hold_until != null then "parked until " + .hold_until
-                else "parked" end); false; hold_text; null; .since)}
+                else "parked" end); false; hold_text; null; $created)}
            else
              {section:"other", v:item("backlog"; $hk; null; .id; hold_age;
                (if expired then "expired " + .hold_until else $hk end);
-               false; hold_text; null; .since)}
+               false; hold_text; null; $created)}
            end ]) as $hold_items
 
     | ([ $tasks[] as $t
