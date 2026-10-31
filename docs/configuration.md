@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl), [external memory tiers](#external-memory-tiers-memory-layering-section), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -95,6 +95,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, scout reports, optional task status archives, and the optional per-task no-mistakes pipeline-spend ledger.
+- The [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl) of asks waiting on the captain.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -889,6 +890,26 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 
 There is no shared learnings file by captain decision.
+
+## Captain-pending ledger (data/captain-pending.jsonl)
+
+Each home records what the captain owes that has no backlog task or hold of its own - a question asked only in chat, an approval, a command the captain must run, or a task only the captain can do - in its private `data/captain-pending.jsonl`.
+The file is gitignored with the rest of `data/`, resolves through `FM_HOME` (or `FM_DATA_OVERRIDE`), and is created on the first `add`; an absent file means nothing is recorded.
+[`bin/fm-captain-pending.sh`](../bin/fm-captain-pending.sh) is the only writer and owns the commands, locking, and the combined `list` view; its `--help` documents them.
+A captain call that gates a backlog task stays a captain hold, as the internal `captain-hold-lifecycle` skill describes, and is never also recorded here.
+
+The file is append-only JSON Lines, one event per line, and an entry's current state is the fold of its events.
+Every event carries `v` (always `1`), `event`, `id`, `at` (UTC ISO-8601), and `epoch` (Unix seconds).
+
+| Event | Additional fields | Effect |
+| --- | --- | --- |
+| `add` | `seq` (integer), `kind` (`question`, `approval`, `command`, `task`, or `other`), `text`, and nullable `task`, `key`, and `due` (`YYYY-MM-DD`) | Creates open entry `cp-<seq>`. |
+| `answer` | nullable `note` (the captain's answer) | Marks an open entry `answered`. |
+| `drop` | nullable `note` (why it no longer needs the captain) | Marks an open entry `dropped`. |
+
+An entry is `open` until its first `answer` or `drop`; later close events for the same id are ignored.
+Readers skip and count lines that are not well-formed version-1 records, so a line torn by a crash never hides the rest of the ledger.
+Secondmate homes keep their own ledgers; a secondmate's asks reach the primary through its parent channel.
 
 ## External memory tiers (Memory layering section)
 
