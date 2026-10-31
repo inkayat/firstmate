@@ -19,6 +19,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,6 +41,10 @@ SCOPE_MAX = 160
 PROJECT_MAX = 64
 DIAG_MAX = 160
 ELLIPSIS = "\u2026"
+PENDING_SCHEMA = "fm-captain-pending-list.v1"
+PENDING_SECTIONS = ("waiting_on_captain", "paused_by_captain_order", "paused_other_reason")
+PENDING_CACHE = ".console-signals-pending.json"
+PENDING_MAX_AGE = 60
 
 # CSI (7- and 8-bit), OSC, DCS/SOS/PM/APC strings, and two-byte ESC sequences.
 ESCAPES = re.compile(
@@ -142,56 +147,127 @@ def clean_env(home: str, code_root: str) -> dict:
 
 
 def backlog_records(home: str, code_root: str, timeout: float) -> list | None:
-    """Backlog rows with the fleet snapshot's own hold classification."""
+    """Backlog rows, for the bots' last-run states."""
     rc, out, err = run([os.path.join(code_root, "bin", "fm-fleet-snapshot.sh"), "--contribution-input"],
                        clean_env(home, code_root), timeout)
     if rc != 0:
-        diag("backlog unreadable, no questions published: " + (err.strip().splitlines() or ["exit %s" % rc])[-1])
+        diag("backlog unreadable, bot run states unknown: " + (err.strip().splitlines() or ["exit %s" % rc])[-1])
         return None
     try:
         records = json.loads(out)["backlog"]["records"]
         return [r for r in records if isinstance(r, dict)]
     except (ValueError, KeyError, TypeError):
-        diag("backlog snapshot was not the expected JSON; no questions published")
+        diag("backlog snapshot was not the expected JSON; bot run states unknown")
         return None
 
 
-def questions_from(records: list) -> list:
-    live = [r for r in records if r.get("hold_bucket") == "live" and r.get("state") != "done"]
-    # Newest hold first (the fleet snapshot's newest-first order for live
-    # holds); undated holds last, ties by id so the order is stable.
-    live.sort(key=lambda r: (str(r.get("id") or "")))
-    live.sort(key=lambda r: str(r.get("hold_set") or r.get("since") or ""), reverse=True)
+def pending_fingerprint(home: str) -> list:
+    """What changes when an ask does: the home's .tasks.toml, every top-level
+    file in data/ (backlog, ledger, secondmate registry), and every task's
+    status and meta file."""
+    found = []
+    for sub, keep in (("", lambda n: n == ".tasks.toml"), ("data", lambda n: True),
+                      ("state", lambda n: n.endswith((".status", ".meta")))):
+        try:
+            with os.scandir(os.path.join(home, sub)) as entries:
+                for e in entries:
+                    if keep(e.name) and e.is_file(follow_symlinks=False):
+                        st = e.stat(follow_symlinks=False)
+                        found.append([sub + "/" + e.name, st.st_mtime_ns, st.st_size, st.st_ino])
+        except OSError:
+            found.append([sub, None, None, None])
+    return sorted(found)
+
+
+def cached_view(cache: str, fingerprint: list) -> dict | None:
+    try:
+        st = os.lstat(cache)
+        if not stat.S_ISREG(st.st_mode) or not 0 <= time.time() - st.st_mtime < PENDING_MAX_AGE:
+            return None
+        with open(cache, encoding="utf-8") as f:
+            cached = json.load(f)
+        view = cached.get("view")
+        if cached.get("fingerprint") == fingerprint and view.get("schema") == PENDING_SCHEMA:
+            return view
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
+def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
+    """(view, complete) from `fm-captain-pending.sh list --json`, or None.
+    complete is False when its fleet snapshot was unavailable (exit 3): the
+    view then holds the ledger alone. With use_cache, a complete view is kept
+    in state/ and reused for up to PENDING_MAX_AGE seconds while the
+    fingerprint of what it reads is unchanged."""
+    cache = os.path.join(args.home, "state", PENDING_CACHE)
+    fingerprint = pending_fingerprint(args.home)
+    if use_cache:
+        view = cached_view(cache, fingerprint)
+        if view is not None:
+            return view, True
+    rc, out, err = run([os.path.join(args.code_root, "bin", "fm-captain-pending.sh"), "list", "--json"],
+                       clean_env(args.home, args.code_root), args.timeout)
+    try:
+        view = json.loads(out) if rc in (0, 3) else None
+    except ValueError:
+        view = None
+    if not isinstance(view, dict) or view.get("schema") != PENDING_SCHEMA:
+        diag("captain-pending view unreadable: " + (err.strip().splitlines() or ["exit %s" % rc])[-1])
+        return None
+    complete = rc == 0 and (view.get("fleet") or {}).get("available") is True
+    if complete and use_cache:
+        try:
+            publish_file(os.path.dirname(cache), PENDING_CACHE,
+                         json.dumps({"fingerprint": fingerprint, "view": view}).encode("utf-8"))
+        except OSError as exc:
+            diag("captain-pending view not cached: %s" % exc)
+    return view, complete
+
+
+def questions_from(view: dict) -> tuple:
+    """(questions, live items left out) from the view's live items."""
+    live = [i for section in PENDING_SECTIONS for i in (view.get(section) or [])
+            if isinstance(i, dict) and i.get("live") is True]
+    # Overdue ledger entries first, then newest first by creation time
+    # (date-only stamps sort as their day, untimed items last); equal times
+    # keep the later-listed item first, so the newer ledger entry leads.
+    live.reverse()
+    live.sort(key=lambda i: i.get("created") if isinstance(i.get("created"), str) else "", reverse=True)
+    live.sort(key=lambda i: i.get("label") != "overdue")
     taken: set = set()
     questions = []
-    for r in live:
+    for i in live:
         if len(questions) == QUESTIONS_MAX:
             break
-        qid = make_id(r.get("id"), taken)
+        kind = {"ledger": i.get("kind"), "backlog": "hold", "status": "status"}.get(i.get("source")) or "ask"
+        task = i.get("task_id")
+        topic = text("%s · %s" % (kind, task) if isinstance(task, str) and task else kind, TOPIC_MAX)
+        body = text(i.get("text"), TEXT_MAX, multiline=True) or topic
+        qid = make_id(i.get("id"), taken) if body else ""
         if not qid:
-            diag("skipped a live hold with no usable id")
-            continue
-        topic = text(r.get("title"), TOPIC_MAX)
-        body = text(r.get("hold_reason"), TEXT_MAX, multiline=True) or topic
-        if not body:
-            diag("skipped live hold %s: no reason or title" % qid)
+            diag("skipped a waiting item with no usable id or text")
             continue
         q = {"id": qid, "text": body}
         if topic:
             q["topic"] = topic
-        hold_set = r.get("hold_set")
-        if isinstance(hold_set, str) and FULL_TIME.match(hold_set):
-            q["since"] = hold_set
+        created = i.get("created")
+        if isinstance(created, str) and FULL_TIME.match(created):
+            q["since"] = created
         questions.append(q)
-    return questions
+    return questions, len(live) - len(questions)
 
 
-def waiting_from(questions: list) -> dict:
+def waiting_from(questions: list, left_out: int, complete: bool) -> dict:
     if not questions:
         return {"state": "none"}
     first = questions[0]
-    w = {"state": "waiting", "reason": cut(first.get("topic") or clean(first["text"], False), REASON_MAX),
-         "question_id": first["id"]}
+    notes = (["+%d more waiting" % left_out] if left_out else []) + \
+        ([] if complete else ["holds and status decisions unreadable"])
+    reason = first.get("topic") or clean(first["text"], False)
+    if notes:
+        reason += " (%s)" % "; ".join(notes)
+    w = {"state": "waiting", "reason": cut(reason, REASON_MAX), "question_id": first["id"]}
     if "since" in first:
         w["since"] = first["since"]
     return w
@@ -245,7 +321,7 @@ def bot_state(row: dict, by_id: dict) -> str:
     return "idle" if (row.get("trigger") or "daily") == "daily" else "unknown"
 
 
-def bots_from(bot_bin: str, home: str, code_root: str, records: list | None, timeout: float) -> list:
+def bots_from(bot_bin: str, home: str, code_root: str, timeout: float) -> list:
     if not bot_bin:
         if os.path.isdir(os.path.join(home, "data", "bots")):
             diag("data/bots exists but no fm-bot lister was found ($FM_CONFIG_ROOT/bin/fm-bot or PATH); no bots published")
@@ -260,6 +336,7 @@ def bots_from(bot_bin: str, home: str, code_root: str, records: list | None, tim
     if not isinstance(listed, list):
         diag("fm-bot list failed, no bots published: " + (err.strip().splitlines() or ["exit %s" % rc])[-1])
         return []
+    records = backlog_records(home, code_root, deadline - time.monotonic()) if listed else None
     by_id = {r.get("id"): r for r in (records or [])}
     taken: set = set()
     bots = []
@@ -300,17 +377,26 @@ def bots_from(bot_bin: str, home: str, code_root: str, records: list | None, tim
     return bots
 
 
-def assemble(args: argparse.Namespace) -> bytes:
-    records = backlog_records(args.home, args.code_root, args.timeout)
-    questions = questions_from(records or [])
+def assemble(args: argparse.Namespace, use_cache: bool) -> bytes:
+    pending = pending_view(args, use_cache)
+    if pending is None:
+        raise ValueError("the captain-pending view is unreadable")
+    view, complete = pending
+    unreadable = (view.get("ledger") or {}).get("unreadable_lines")
+    if isinstance(unreadable, int) and unreadable > 0:
+        diag("%d unreadable captain-pending ledger line(s) skipped" % unreadable)
+    questions, left_out = questions_from(view)
+    if not complete and not questions:
+        raise ValueError("captain holds and status decisions unreadable and no ledger entry is open; "
+                         "nothing reliable to publish")
     doc = {
         "schema": SCHEMA,
         "home": args.home,
         "lock_pid": int(args.lock_pid),
         "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "waiting": waiting_from(questions),
+        "waiting": waiting_from(questions, left_out, complete),
         "questions": questions,
-        "bots": bots_from(args.bot_bin, args.home, args.code_root, records, args.timeout),
+        "bots": bots_from(args.bot_bin, args.home, args.code_root, args.timeout),
     }
     data = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     if len(data) > FILE_MAX:
@@ -318,14 +404,14 @@ def assemble(args: argparse.Namespace) -> bytes:
     return data
 
 
-def publish(state: str, data: bytes) -> None:
-    fd, tmp = tempfile.mkstemp(prefix="." + FILE_NAME + ".", dir=state)
+def publish_file(state: str, name: str, data: bytes) -> None:
+    fd, tmp = tempfile.mkstemp(prefix="." + name + ".", dir=state)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, os.path.join(state, FILE_NAME))
+        os.replace(tmp, os.path.join(state, name))
     except BaseException:
         try:
             os.unlink(tmp)
@@ -349,11 +435,11 @@ def main() -> int:
     if not 0 < args.timeout <= 300:
         args.timeout = 20
     try:
-        data = assemble(args)
+        data = assemble(args, use_cache=args.mode == "write")
         if args.mode == "print":
             sys.stdout.buffer.write(data)
         else:
-            publish(os.path.join(args.home, "state"), data)
+            publish_file(os.path.join(args.home, "state"), FILE_NAME, data)
     except (OSError, ValueError) as exc:
         diag("not published: %s" % exc)
         return 1
