@@ -553,7 +553,6 @@ test_unavailable_snapshot_and_cache() {
   # left to age instead of claiming that nothing waits.
   touch "$home/data/backlog.md"
   before=$(cat "$f")
-  sleep 1.1
   rc=0
   err=$(FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=invalid run_signals "$home" "" write 2>&1 >/dev/null) || rc=$?
   assert_not_equals 0 "$rc" "an incomplete view with nothing reliable must not publish"
