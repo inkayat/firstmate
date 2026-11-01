@@ -35,8 +35,9 @@ document:
 commands:
   lint: 'bin/fm-lint.sh && bash tests/fm-pi-primary-types.test.sh'
 
-# Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
-# The evidence is not committed to the feature or default branch.
+# Keep each run's test evidence private: no orphan evidence branch push and no
+# GitHub user-attachments upload. Evidence stays under the no-mistakes home.
+# These two fields are read from the pushed branch, unlike test.instructions.
 test:
   instructions: |
     Run live Herdr scenarios only through bin/fm-herdr-lab.sh with a named non-default fm-lab-* session, following that helper's prepare, provision, run, and teardown contract exactly.
@@ -48,4 +49,11 @@ test:
     Read docs/herdr-backend.md and the bin/fm-herdr-lab.sh header as the owners of Herdr lab mechanics rather than reproducing that manual here.
     Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.
   evidence:
-    store_in_repo: true
+    store_in_repo: false
+    attach_media: false
+
+# No automatic CI repair: a CI failure or a merge conflict with the base waits
+# for an explicit answer, so the CI step never rebases or force-pushes on its
+# own. Read from the pushed branch.
+auto_fix:
+  ci: 0

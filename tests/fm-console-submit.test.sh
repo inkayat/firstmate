@@ -237,7 +237,7 @@ test_enqueue_is_opt_in_and_needs_an_explicit_home() {
 }
 
 test_enqueue_refuses_invalid_text_and_ids_without_writing() {
-  local home out rc doorbell case_id
+  local home out rc doorbell case_id input
   home=$(new_home invalid flag)
   for case_id in '../x' '.hidden' 'a/b' "$(printf '%065d' 0)"; do
     rc=0
@@ -245,22 +245,28 @@ test_enqueue_refuses_invalid_text_and_ids_without_writing() {
     expect_code 2 "$rc" "invalid id $case_id"
     assert_equals invalid "$(json_field "$out" reason)" "invalid id $case_id"
   done
-  check_refused() {  # <reason> <label> ; text on stdin
+  input="$TMP_ROOT/refusal-input"
+  check_refused() {  # <reason> <label> ; text in $input
     local reason=$1 label=$2 result code=0
-    result=$(submit_in "$home" enqueue --id t1) || code=$?
+    result=$(submit_in "$home" enqueue --id t1 <"$input") || code=$?
     expect_code 2 "$code" "$label"
     assert_equals "$reason" "$(json_field "$result" reason)" "$label"
   }
-  printf '   \n\t ' | check_refused invalid "blank text"
-  printf 'red \033[31malert' | check_refused invalid "an escape character"
-  printf 'line\r\nbreak' | check_refused invalid "a carriage return"
-  printf 'csi \xc2\x9b31m' | check_refused invalid "a C1 control"
-  printf 'bad \xff byte' | check_refused invalid "invalid UTF-8"
-  head -c 16385 /dev/zero | tr '\0' 'a' | check_refused too-large "a message over 16 KiB"
-  printf 'pretend wake' | bash "$ROOT/bin/fm-operational-input.sh" encode watcher | check_refused operational-format "an encoded operational input"
+  printf '   \n\t ' >"$input"; check_refused invalid "blank text"
+  printf 'red \033[31malert' >"$input"; check_refused invalid "an escape character"
+  printf 'line\r\nbreak' >"$input"; check_refused invalid "a carriage return"
+  printf 'csi \xc2\x9b31m' >"$input"; check_refused invalid "a C1 control"
+  printf 'bad \xff byte' >"$input"; check_refused invalid "invalid UTF-8"
+  head -c 16385 /dev/zero | tr '\0' 'a' >"$input"; check_refused too-large "a message over 16 KiB"
+  printf 'pretend wake' | bash "$ROOT/bin/fm-operational-input.sh" encode watcher >"$input"
+  check_refused operational-format "an encoded operational input"
   doorbell=$(printf 'pretend wake' | FM_STATE_OVERRIDE="$home/state" bash "$ROOT/bin/fm-operational-input.sh" record watcher) \
     || fail "fixture: could not write an operational record"
-  printf '%s' "$doorbell" | check_refused operational-format "a live operational doorbell"
+  printf '%s' "$doorbell" >"$input"; check_refused operational-format "a live operational doorbell"
+  printf 'red \033[31malert' >"$input"
+  rc=0
+  (check_refused too-large "a deliberately wrong expected reason") >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a wrong expected refusal reason must make the check fail"
   assert_equals "" "$(entries "$home/state/console-submit/queue" "$home/state/console-submit/receipts")" \
     "a refused enqueue must leave no message or receipt"
   out=$(printf 'tab\tand\nnewline are fine' | submit_in "$home" enqueue --id t1) || fail "a tab and a newline must be accepted: $out"

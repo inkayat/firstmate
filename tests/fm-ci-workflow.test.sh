@@ -20,6 +20,12 @@
 # FM_CI_SKIP_MACOS let a fork skip the push run and the macOS job through a
 # job-level condition, while with neither set every job runs exactly as before.
 #
+# They also hold the fork integration branch: pushes to inkayat-main and pull
+# requests into it run the same CI as main, its pushes keep only their own
+# newest run without cancelling a main run, and the no-mistakes compliance
+# check (.github/workflows/no-mistakes-required.yml) judges pull requests into
+# either branch. Any other branch starts neither workflow.
+#
 # The workflow is parsed as YAML and its concurrency and job-level `if`
 # expressions are resolved against simulated pull_request and push contexts,
 # so the assertions describe what GitHub would do, not how the file happens
@@ -30,8 +36,10 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 CI_WORKFLOW="$ROOT/.github/workflows/ci.yml"
+COMPLIANCE_WORKFLOW="$ROOT/.github/workflows/no-mistakes-required.yml"
 
 assert_present "$CI_WORKFLOW" ".github/workflows/ci.yml is missing"
+assert_present "$COMPLIANCE_WORKFLOW" ".github/workflows/no-mistakes-required.yml is missing"
 command -v ruby >/dev/null 2>&1 \
   || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
 
@@ -168,10 +176,11 @@ end
 '
 
 # Build a simulated GitHub context from KEY=VALUE overrides on top of an
-# outside contributor's fork PR synchronize event: no labels, no write access,
-# fork variables unset, and needed jobs successful. Short keys: event, action,
-# label (the label an event adds), labels (comma-separated labels on the PR),
-# association, head (head repository), number, run_id, skip_push, skip_macos,
+# outside contributor's fork PR synchronize event into main: no labels, no
+# write access, fork variables unset, and needed jobs successful. Short keys:
+# event, action, label (the label an event adds), labels (comma-separated
+# labels on the PR), association, head (head repository), base (the PR's base
+# branch), ref (the pushed branch), number, run_id, skip_push, skip_macos,
 # needs (success, failure, or cancelled: the needed jobs' results that job
 # conditions and the Full suite verdict read), outcome (how every job that runs
 # concludes, read only by published_checks). A push event clears the PR fields,
@@ -182,21 +191,25 @@ def simulated_context(workflow_name, overrides)
   o = {
     "event" => "pull_request", "action" => "synchronize", "label" => "",
     "labels" => "", "association" => "NONE", "head" => "contributor/firstmate",
-    "number" => "108", "run_id" => "900001", "skip_push" => "", "skip_macos" => "",
+    "number" => "108", "base" => "main", "ref" => "main", "run_id" => "900001",
+    "skip_push" => "", "skip_macos" => "",
     "needs" => "success", "outcome" => "success",
   }
   if overrides.any? { |pair| pair == "event=push" }
-    o.merge!("action" => "", "association" => "", "head" => "", "number" => "")
+    o.merge!("action" => "", "association" => "", "head" => "", "number" => "", "base" => "")
   end
   overrides.each do |pair|
     key, value = pair.split("=", 2)
     raise "unknown context key #{key}" unless o.key?(key)
     o[key] = value.to_s
   end
+  push = o["event"] == "push"
   {
     "github.workflow" => workflow_name,
     "github.repository" => "kunchenguid/firstmate",
     "github.event_name" => o["event"],
+    "github.ref_name" => push ? o["ref"] : "#{o["number"]}/merge",
+    "github.base_ref" => o["base"],
     "github.event.action" => o["action"],
     "github.event.label.name" => o["label"],
     "github.event.pull_request.labels.*.name" => o["labels"].split(","),
@@ -213,13 +226,23 @@ def simulated_context(workflow_name, overrides)
 end
 
 # Whether the workflow triggers start a run for this simulated event at all:
-# a pull_request action outside on.pull_request.types (the GitHub default when
-# absent is opened, synchronize, reopened) starts no run and publishes nothing.
+# an event the workflow does not list, a pushed branch or PR base branch
+# outside its branches filter, or a pull_request action outside
+# on.pull_request.types (the GitHub default when absent is opened,
+# synchronize, reopened) starts no run and publishes nothing.
 # Psych reads the bare key `on` as true.
 def triggered?(doc, context)
-  return true unless context["github.event_name"] == "pull_request"
   triggers = doc[true] || doc["on"]
-  types = triggers.fetch("pull_request", nil).to_h.fetch("types", %w[opened synchronize reopened])
+  event = context["github.event_name"]
+  return false unless triggers.key?(event)
+  filter = triggers.fetch(event).to_h
+  branch = event == "push" ? context["github.ref_name"] : context["github.base_ref"]
+  branches = filter.fetch("branches", nil)
+  if branches && branches.none? { |pattern| File.fnmatch?(pattern, branch, File::FNM_PATHNAME) }
+    return false
+  end
+  return true unless event == "pull_request"
+  types = filter.fetch("types", %w[opened synchronize reopened])
   types.include?(context["github.event.action"])
 end
 
@@ -332,7 +355,7 @@ puts YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("timeout-minutes
 # one-off number the policy removed.
 FAST_TIER_JOBS='test-coverage invariants tests-timing-aggregate full-suite'
 NORMAL_TIER_JOBS='lint tests-portable-parallel-1 tests-portable-parallel-2 tests-portable-serial macos-stock-bash'
-HEAVY_TIER_JOBS='tests-herdr'
+HEAVY_TIER_JOBS='tests-herdr tests-hc'
 
 # Print the one timeout every listed job shares; fail on any disagreement.
 tier_timeout() {  # <tier> <job>...
@@ -393,6 +416,74 @@ test_main_pushes_keep_only_the_newest_run() {
   [ "$(group_of "$first")" != "$(group_of "$pr")" ] \
     || fail "a PR run must never share the main push group ($(group_of "$first"))"
   pass "close main pushes keep only the newest run, apart from every PR group"
+}
+
+# The fork integration branch keeps only its own newest push run, and a push
+# there never cancels a main run or shares a group with a PR run.
+test_integration_branch_pushes_keep_only_their_own_newest_run() {
+  local main first second pr
+  main=$(resolve_concurrency event=push ref=main run_id=900030) || fail "could not resolve main push concurrency"
+  first=$(resolve_concurrency event=push ref=inkayat-main run_id=900031) || fail "could not resolve push concurrency"
+  second=$(resolve_concurrency event=push ref=inkayat-main run_id=900032) || fail "could not resolve push concurrency"
+  pr=$(resolve_concurrency base=inkayat-main number=108 run_id=900033) || fail "could not resolve PR concurrency"
+  [ "$(group_of "$first")" = "$(group_of "$second")" ] && [ "$(cancel_of "$second")" = true ] \
+    || fail "inkayat-main pushes must share one cancelling group, got $first and $second"
+  [ "$(group_of "$first")" != "$(group_of "$main")" ] \
+    || fail "an inkayat-main push must not share the main push group ($(group_of "$main"))"
+  [ "$(group_of "$first")" != "$(group_of "$pr")" ] \
+    || fail "an inkayat-main push must not share a PR group ($(group_of "$pr"))"
+  pass "inkayat-main pushes keep only their newest run, apart from main pushes and PR runs"
+}
+
+# Pushes to inkayat-main and PRs into it run every CI job, exactly as main
+# does; a push to or a PR into any other branch starts no run.
+test_ci_runs_for_main_and_the_integration_branch() {
+  local all expected context want actual
+  all=$(workflow_jobs | tr '\n' ' ') || fail "could not list ci.yml jobs"
+  while read -r expected context; do
+    case $expected in all) want=$all ;; none) want= ;; esac
+    # shellcheck disable=SC2086  # the context column is a deliberate word list
+    actual=$(jobs_running_under $context association=OWNER | tr '\n' ' ') \
+      || fail "could not resolve jobs for $context"
+    [ "$actual" = "$want" ] || fail "$context must run $expected jobs, ran: $actual"
+  done <<'TABLE'
+all  event=push ref=main
+all  event=push ref=inkayat-main
+all  base=main
+all  base=inkayat-main
+none event=push ref=feature
+none base=feature
+TABLE
+  pass "pushes to and PRs into main or inkayat-main run every job; other branches start nothing"
+}
+
+# Print true or false: whether a workflow's triggers start a run under one
+# simulated context.
+workflow_triggered() {  # <workflow> [KEY=VALUE]...
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
+doc = YAML.load_file(ARGV.shift)
+puts triggered?(doc, simulated_context(doc.fetch("name"), ARGV))
+' "$@"
+}
+
+# The no-mistakes compliance check judges every body-bearing and head-moving
+# PR event into main or inkayat-main, and nothing into another branch.
+test_compliance_check_covers_main_and_the_integration_branch() {
+  local expected base action actual
+  while read -r expected base action; do
+    actual=$(workflow_triggered "$COMPLIANCE_WORKFLOW" base="$base" action="$action") \
+      || fail "could not resolve the compliance trigger for $base $action"
+    [ "$actual" = "$expected" ] \
+      || fail "a PR $action into $base must resolve the compliance trigger $expected, got $actual"
+  done <<'TABLE'
+true  main         opened
+true  inkayat-main opened
+true  inkayat-main edited
+true  inkayat-main synchronize
+true  inkayat-main reopened
+false feature      opened
+TABLE
+  pass "the no-mistakes compliance check runs on PRs into main and inkayat-main only"
 }
 
 # DOP-167: adding any other label neither starts nor cancels a run, while the
@@ -606,22 +697,30 @@ test_heavy_tier_keeps_a_step_tripwire_under_a_job_backstop() {
     || fail "heavy tier backstop ($heavy) must exceed the normal tier ($normal)"
   [ "$heavy" -ge 60 ] && [ "$heavy" -le 75 ] \
     || fail "heavy tier backstop must stay a 60-75 minute last resort, got $heavy"
-  step=$(ruby -ryaml -e '
+  # Each heavy lane's family-run step owns the same 20-minute tripwire shape:
+  # its own timeout, an always() cleanup step that must come after it, and a
+  # bound below the shared job backstop.
+  while read -r lane run_step cleanup_step; do
+    step=$(ruby -ryaml -e '
 steps = YAML.load_file(ARGV[0]).fetch("jobs").fetch(ARGV[1]).fetch("steps")
-index = steps.index { |s| s["id"] == "run-real-herdr-family" }
-raise "no run-real-herdr-family step" unless index
-teardown = steps.index { |s| s["id"] == "cleanup-herdr-lab-sessions" }
-raise "no cleanup-herdr-lab-sessions step" unless teardown
+index = steps.index { |s| s["id"] == ARGV[2] }
+raise "no #{ARGV[2]} step" unless index
+teardown = steps.index { |s| s["id"] == ARGV[3] }
+raise "no #{ARGV[3]} step" unless teardown
 raise "teardown must follow the family-run step" unless teardown > index
 raise "teardown must run under always()" unless steps[teardown]["if"].to_s.strip == "always()"
 puts steps[index].fetch("timeout-minutes", "none")
-' "$CI_WORKFLOW" tests-herdr) || fail "could not read the Herdr family-run step"
-  case "$step" in ''|*[!0-9]*) fail "the Herdr family-run step needs its own timeout-minutes, got $step" ;; esac
-  [ "$step" = 20 ] \
-    || fail "the Herdr family-run step must be the 20-minute tripwire, got $step"
-  [ "$step" -lt "$heavy" ] \
-    || fail "the Herdr step tripwire ($step) must stay below the job backstop ($heavy)"
-  pass "Herdr keeps a $step minute step tripwire under a $heavy minute job backstop"
+' "$CI_WORKFLOW" "$lane" "$run_step" "$cleanup_step") || fail "could not read the $lane family-run step"
+    case "$step" in ''|*[!0-9]*) fail "the $lane family-run step needs its own timeout-minutes, got $step" ;; esac
+    [ "$step" = 20 ] \
+      || fail "the $lane family-run step must be the 20-minute tripwire, got $step"
+    [ "$step" -lt "$heavy" ] \
+      || fail "the $lane step tripwire ($step) must stay below the job backstop ($heavy)"
+  done <<'LANES'
+tests-herdr run-real-herdr-family cleanup-herdr-lab-sessions
+tests-hc run-real-hc-family cleanup-hc-lab-sessions
+LANES
+  pass "each heavy lane keeps a 20 minute step tripwire under a $heavy minute job backstop"
 }
 
 # The fork opt-out is opt-in: with neither variable set every job runs on both
@@ -719,6 +818,9 @@ test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
 test_main_pushes_keep_only_the_newest_run
+test_integration_branch_pushes_keep_only_their_own_newest_run
+test_ci_runs_for_main_and_the_integration_branch
+test_compliance_check_covers_main_and_the_integration_branch
 test_only_the_full_ci_label_joins_the_pr_group
 test_outside_pr_without_label_runs_only_quick_checks
 test_full_ci_label_runs_the_whole_suite

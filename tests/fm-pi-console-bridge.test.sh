@@ -922,7 +922,9 @@ const b2 = await t.waitFor(() => {
   return current.conversation === "conv-y.jsonl" && current.state === "live" ? current : null;
 }, "the new conversation");
 t.assert(b2.startedReason === "new" && b2.previousGen === b1.gen, `new-session record was ${JSON.stringify(b2)}`);
-t.assert(!existsSync(`${t.journalDir(home)}/${a1}.jsonl`), "the generation before the previous one was kept");
+// The bridge publishes current.json before it prunes, so wait for the prune
+// itself; a prune that never happens still fails this wait.
+await t.waitFor(() => !existsSync(`${t.journalDir(home)}/${a1}.jsonl`), "the generation before the previous one to be removed");
 t.assert(existsSync(`${t.journalDir(home)}/${b1.gen}.jsonl`), "the previous generation was removed");
 
 // Leaving the journalled branch through /tree opens a new generation.
@@ -948,10 +950,11 @@ await runtimeB.emit("agent_start", {}, ctxY);
 await runtimeB.emit("agent_settled", { aborted: false }, ctxY);
 await t.sleep(300);
 t.assert(t.readCurrent(home).gen === b4.gen, "a custom entry opened a new generation");
+const ownJournals = () => t.journalNames(home).filter((name) => /^[0-9a-f]{32}\.jsonl$/.test(name) && name !== `${"a".repeat(32)}.jsonl`);
+const expectedJournals = JSON.stringify([`${b3.gen}.jsonl`, `${b4.gen}.jsonl`].sort());
+await t.waitFor(() => JSON.stringify(ownJournals()) === expectedJournals, `only ${expectedJournals} to be kept`);
 for (const name of foreign) t.assert(existsSync(`${t.journalDir(home)}/${name}`), `foreign file ${name} was removed`);
 t.assert(existsSync(`${t.journalDir(home)}/requests`), "a foreign directory was removed");
-const journals = t.journalNames(home).filter((name) => /^[0-9a-f]{32}\.jsonl$/.test(name) && name !== `${"a".repeat(32)}.jsonl`);
-t.assert(JSON.stringify(journals) === JSON.stringify([`${b3.gen}.jsonl`, `${b4.gen}.jsonl`].sort()), `kept journals were ${journals}`);
 t.assertClean(runtimeA, "runtime A");
 t.assertClean(runtimeB, "runtime B");
 console.log("ok");

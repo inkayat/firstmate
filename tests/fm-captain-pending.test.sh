@@ -97,6 +97,10 @@ pending "$home" answer "$a" >/dev/null
 c=$(pending "$home" add --kind approval --key merge-x -- "Approve the next merge" 2>/dev/null)
 assert_not_equals "$a" "$c" "a closed key was reopened instead of recording a new ask"
 expect_exit 2 pending "$home" add --kind wish -- "bad kind"
+before=$(cat "$home/data/captain-pending.jsonl")
+expect_exit 2 pending "$home" add --kind "approval command" -- "two kinds at once"
+expect_exit 2 pending "$home" add --kind "" -- "empty kind"
+assert_equals "$before" "$(cat "$home/data/captain-pending.jsonl")" "a refused kind must leave the ledger unchanged"
 expect_exit 2 pending "$home" add --kind question
 expect_exit 2 pending "$home" add --kind question --due tomorrow -- "bad date"
 pass "a repeated key is idempotent while open and invalid input is refused"
@@ -227,6 +231,12 @@ encoded() {  # <reason>
   (. "$ROOT/bin/fm-hold-reason-lib.sh" && fm_hold_reason_encode "$1")
 }
 home=$(make_home generations)
+utc_ago() {  # <seconds>
+  local epoch=$(( $(date +%s) - $1 ))
+  date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+}
+held_a=$(utc_ago 7200)
+held_b=$(utc_ago 3600)
 live_reason=$'Pick (A) or B?\nNotes: café ✓'
 cat > "$home/data/backlog.md" <<EOF
 # Backlog
@@ -234,20 +244,20 @@ cat > "$home/data/backlog.md" <<EOF
 ## In flight
 ## Queued
 - [ ] live-a - Live   call see https://example.com/x (repo: alpha) (since 2026-10-30) (hold: $(encoded "$live_reason")) (hold-kind: captain)
-  Captain hold set: 2026-10-30T09:15:00Z
+  Captain hold set: $held_a
 - [ ] reheld - Re-held call (repo: alpha) (since 2026-10-30) (hold: choose again) (hold-kind: captain)
-  Captain hold set: 2026-10-31T10:00:00Z
+  Captain hold set: $held_b
   Resolution recorded by fm-captain-hold.
   Decision digest: 0000
   Resolution mode: released
 - [ ] dated - Dated call (repo: alpha) (since 2026-10-30) (hold: later) (hold-kind: captain) (hold-until: 2099-01-01)
-  Captain hold set: 2026-10-30T09:15:00Z
+  Captain hold set: $held_a
 - [ ] aged - Aged call (repo: alpha) (since 2020-01-01) (hold: old question) (hold-kind: captain)
   Captain hold set: 2020-01-01T00:00:00Z
 - [ ] expired - Expired call (repo: alpha) (since 2026-10-30) (hold: revisit) (hold-kind: captain) (hold-until: 2020-01-01)
-  Captain hold set: 2026-10-30T09:15:00Z
+  Captain hold set: $held_a
 - [ ] gated - Gated call blocked-by: open-dep (repo: alpha) (since 2026-10-30) (hold: needs dep) (hold-kind: captain)
-  Captain hold set: 2026-10-30T09:15:00Z
+  Captain hold set: $held_a
 - [ ] open-dep - Dependency (repo: alpha) (since 2026-10-30)
 - [ ] parked-one - Parked work (repo: alpha) (since 2026-10-30) (hold: captain said stop) (hold-kind: parked)
 - [ ] ext-one - External (repo: alpha) (since 2026-10-30) (hold: vendor reply) (hold-kind: external)
@@ -267,13 +277,13 @@ bucket_of() {  # <id> [<key>]
     'first(.waiting_on_captain[], .paused_by_captain_order[], .paused_other_reason[]
        | select(.id == $id and ($key == "" or .key == $key))) | "\(.bucket)|\(.generation)|\(.reply.answer_to // "-")"'
 }
-live_gen="2026-10-30T09:15:00Z#0#$(sha256_hex "Live call see"$'\n'"$live_reason")"
+live_gen="$held_a#0#$(sha256_hex "Live call see"$'\n'"$live_reason")"
 assert_equals "live|$live_gen|backlog:live-a@$live_gen" "$(bucket_of live-a)" \
   "a live hold's generation is its hold-set stamp, answer count, and the digest of its title and decoded reason"
-reheld_gen="2026-10-31T10:00:00Z#1#$(sha256_hex $'Re-held call\nchoose again')"
+reheld_gen="$held_b#1#$(sha256_hex $'Re-held call\nchoose again')"
 assert_equals "live|$reheld_gen|backlog:reheld@$reheld_gen" "$(bucket_of reheld)" \
   "a re-held call counts the answers already recorded on it"
-assert_equals "deferred|2026-10-30T09:15:00Z#0#$(sha256_hex $'Dated call\nlater')|backlog:dated@2026-10-30T09:15:00Z#0#$(sha256_hex $'Dated call\nlater')" \
+assert_equals "deferred|$held_a#0#$(sha256_hex $'Dated call\nlater')|backlog:dated@$held_a#0#$(sha256_hex $'Dated call\nlater')" \
   "$(bucket_of dated)" "a deferred hold keeps its generation and stays answerable"
 assert_equals needs_recheck "$(bucket_of aged | cut -d'|' -f1)" "an aged hold is a re-check, not gone"
 assert_equals needs_recheck "$(bucket_of expired | cut -d'|' -f1)" "a hold past its deferral date is a re-check"
@@ -293,7 +303,7 @@ pass "every pending item carries a bucket, and replyable requests a generation a
 # but must change the generation; rewriting it back restores the generation.
 sed -i.bak "s/(hold: later)/(hold: later, after launch)/" "$home/data/backlog.md"
 view=$(pending "$home" list --json) || fail "rewritten list failed"
-assert_equals "deferred|2026-10-30T09:15:00Z#0#$(sha256_hex $'Dated call\nlater, after launch')" \
+assert_equals "deferred|$held_a#0#$(sha256_hex $'Dated call\nlater, after launch')" \
   "$(bucket_of dated | cut -d'|' -f1-2)" "a rewritten reason changes the generation under the same stamp"
 pass "a reason rewritten in place changes the generation"
 
@@ -385,3 +395,14 @@ view=$(FM_SNAPSHOT_SECONDMATES=1 pending "$home" list --json) || fail "a bounded
 assert_contains "$(field "$view" '[.coverage.missing[].source] | join(",")')" "secondmates" \
   "secondmates beyond the snapshot bound are not disclosed"
 pass "an unread or truncated secondmate leaves the view incomplete instead of counting it as complete"
+
+home=$(make_home registry-truncated)
+printf '# fixture header one\n# fixture header two\n# fixture header three\n' > "$home/data/secondmates.md"
+view=$(FM_SNAPSHOT_REGISTRY_LINES=1 pending "$home" list --json) || fail "a home with a truncated secondmate registry could not be listed"
+assert_equals 'false|secondmates' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a secondmate registry read short of its end, with no registered secondmate, is published as complete"
+assert_contains "$(field "$view" '.coverage.missing[0].reason')" "not read in full" "the incomplete registry is not disclosed"
+view=$(pending "$home" list --json) || fail "a home with an untruncated empty secondmate registry could not be listed"
+assert_equals 'true|' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a fully read registry with no secondmate leaves the view complete"
+pass "an incompletely read secondmate registry leaves the view incomplete even with no registered secondmate"
