@@ -1061,10 +1061,10 @@ The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.
-Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
-
-That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
+The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) keeps test evidence private with `test.evidence.store_in_repo: false` and `test.evidence.attach_media: false`, sets `auto_fix.ci: 0`, and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.
+Evidence therefore stays on local disk under the no-mistakes home: no run pushes an orphan evidence branch or uploads media to GitHub, and the worktree's `.no-mistakes/` stays local, with CI rejecting tracked entries under that path.
+With `auto_fix.ci: 0`, a CI failure or a merge conflict with the base branch waits for an explicit gate answer instead of an automatic repair, so the CI step never rebases or force-pushes a branch on its own.
+No-mistakes reads these evidence and auto-fix fields from the pushed branch rather than from the default-branch copy.
 The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-guidelines/SKILL.md#no-mistakes-test-configuration) owns why `commands.test` stays absent and targeted validation belongs to the evidence path.
 
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
