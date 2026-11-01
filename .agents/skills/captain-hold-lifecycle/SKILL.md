@@ -1,7 +1,7 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, when choosing between a captain-held task and a captain-pending ledger entry for an ask, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -50,11 +50,6 @@ Never use `answer` for an evidence-only moot call: `answer` records what the cap
 A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
-
-An ask that gates no backlog work - a question raised only in chat, an approval, a command the captain must run, an action only the captain can take - has no task to hold, so it goes in the captain-pending ledger instead: `bin/fm-captain-pending.sh add` at ask time, with `--task` when it concerns a task and `--key` when the same ask may be raised again.
-An ask that gates a backlog item is held on that item and never also added to the ledger, because one ask recorded in two places drifts.
-Close a ledger entry with `answer --note` carrying the captain's words, or `drop --note` when it became moot; never leave an answered entry open.
-`bin/fm-captain-pending.sh list` is the one combined view of the ledger, captain holds, parked work, and open status decisions; read it when the captain asks what is waiting on the captain, and its `--help` owns the sections and labels.
 
 A captain call can be written down twice - as the keyed status decision the fold reads, and as the backlog task held for the captain - and those two records can disagree without either surface saying so.
 `bin/fm-captain-hold.sh diverged` reports that contradiction and the wake drain prints it as `RECORD DIVERGENCE`; it closes nothing, because a captain call closed wrongly leaves review entirely, which is worse than the noise.

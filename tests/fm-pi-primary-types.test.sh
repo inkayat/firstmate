@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Strict no-emit production-consumer checks against public Pi 1.1.0, 1.2.0, and 1.4.0,
+# Strict no-emit production-consumer checks against public Pi 1.1.0 and 1.2.0,
 # plus the read guard's real SDK event/abort regression on Linux.
 # Owns temporary npm dependencies and TypeScript 5.9.3; never uses global tsc
 # or FM_PI_PACKAGE_DIR. Compiler-owning lint/CI phases run this check.
@@ -20,13 +20,12 @@ trap 'rm -rf "$DEPENDENCY_ROOT"' EXIT
 
 printf 'Pi production-consumer typechecks: npm %s\n' "$(npm --version)"
 result=0
-for version in 1.1.0 1.2.0 1.4.0; do
+for version in 1.1.0 1.2.0; do
 TMP_ROOT="$DEPENDENCY_ROOT/sdk-$version"
 mkdir -p "$TMP_ROOT/lib"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$TMP_ROOT/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-calm.ts" "$TMP_ROOT/fm-calm.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$TMP_ROOT/fm-primary-pi-watch.ts"
-cp "$ROOT/.pi/extensions/fm-console-bridge.ts" "$TMP_ROOT/fm-console-bridge.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$TMP_ROOT/fm-primary-turnend-guard.ts"
 cp "$ROOT/.pi/extensions/fm-primary-read-repetition.ts" "$TMP_ROOT/fm-primary-read-repetition.ts"
 cp "$ROOT/.pi/extensions/lib/fm-primary-read-repetition-policy.ts" "$TMP_ROOT/lib/fm-primary-read-repetition-policy.ts"
@@ -42,12 +41,6 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visib
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$TMP_ROOT/lib/fm-calm-working-ship.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$TMP_ROOT/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$TMP_ROOT/lib/fm-operational-input.ts"
-# The omp console extensions import the Pi ones from ../../.pi/extensions/,
-# so give them that layout over the same copies.
-mkdir -p "$TMP_ROOT/omp/extensions" "$TMP_ROOT/.pi"
-ln -s .. "$TMP_ROOT/.pi/extensions"
-cp "$ROOT/.omp/extensions/fm-console-bridge.ts" "$TMP_ROOT/omp/extensions/fm-console-bridge.ts"
-cp "$ROOT/.omp/extensions/fm-console-submit.ts" "$TMP_ROOT/omp/extensions/fm-console-submit.ts"
 node - "$TMP_ROOT" "$version" <<'JS'
 const { writeFileSync } = require("node:fs");
 // Each SDK's packages must stay on its own version. Their public ^ ranges
@@ -69,7 +62,7 @@ cat > "$TMP_ROOT/tsconfig.json" <<'JSON'
     "target": "ES2022",
     "types": ["node"]
   },
-  "include": ["*.ts", "lib/*.ts", "omp/extensions/*.ts"]
+  "include": ["*.ts", "lib/*.ts"]
 }
 JSON
 

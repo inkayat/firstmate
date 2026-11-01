@@ -1905,14 +1905,9 @@ handle_wake() {  # <reason> <state>
   [ "$classification_failed" -eq 0 ]
 }
 
-# A captain inbox note's `check inbox:<id>` row is relayed to the supervisor
-# like every check wake, but the note itself stays pending for firstmate to
-# answer; the drain refuses to consume that row unless the acknowledgement names
-# the note (bin/fm-wake-drain.sh header), so the ack names exactly the notes
-# this batch relayed and the drain logs each one.
 handle_durable_wakes() {  # <watcher-reason> <state>
   local fallback_reason=$1 state=$2 out err tab epoch sequence kind key payload rest
-  local handled=0 failed=0 ack_through ack_generation relayed_notes=''
+  local handled=0 failed=0 ack_through ack_generation
   out=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || return 1
   err=$(mktemp "$state/.subsuper-wake-drain.XXXXXX") || { rm -f "$out"; return 1; }
   if ! "$FM_DAEMON_DIR/fm-wake-drain.sh" > "$out" 2> "$err"; then
@@ -1928,16 +1923,6 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
     handle_wake "$payload" "$state" || failed=1
     handled=$((handled + 1))
-    if [ "$kind" = check ]; then
-      case "$key" in
-        inbox:*)
-          case "${key#inbox:}" in
-            ''|*..*|*[!A-Za-z0-9._-]*) ;;
-            *) relayed_notes="${relayed_notes:+$relayed_notes,}${key#inbox:}" ;;
-          esac
-          ;;
-      esac
-    fi
   done < "$out"
   if [ "$handled" -eq 0 ]; then handle_wake "$fallback_reason" "$state" || failed=1; fi
 
@@ -1953,13 +1938,8 @@ handle_durable_wakes() {  # <watcher-reason> <state>
     log "wake drain omitted its generation-bound acknowledgement; retaining durable wakes"
     return 1
   fi
-  if [ -n "$relayed_notes" ]; then
-    "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-      --recovery-generation "$ack_generation" --allow-pending-notes "$relayed_notes"
-  else
-    "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
-      --recovery-generation "$ack_generation"
-  fi
+  "$FM_DAEMON_DIR/fm-wake-drain.sh" --ack-through "$ack_through" \
+    --recovery-generation "$ack_generation"
 }
 
 # --- log --------------------------------------------------------------------

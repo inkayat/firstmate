@@ -366,10 +366,6 @@
       "audience": "operator-current"
     },
     {
-      "path": "docs/console-submit.md",
-      "audience": "maintainer-architecture"
-    },
-    {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },
@@ -456,10 +452,6 @@
     {
       "path": "docs/rex-backend.md",
       "audience": "operator-current"
-    },
-    {
-      "path": "docs/pi-console-journal.md",
-      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/pi-supervision-branch.md",
