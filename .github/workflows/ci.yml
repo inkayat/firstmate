@@ -1,10 +1,12 @@
 name: CI
 
+# inkayat-main is this fork's integration branch: its pushes and the pull
+# requests into it run the same CI as main.
 on:
   push:
-    branches: [main]
+    branches: [main, inkayat-main]
   pull_request:
-    branches: [main]
+    branches: [main, inkayat-main]
     # labeled lets the full-ci go-ahead start the full suite; see the
     # outside pull request gate below.
     types: [opened, synchronize, reopened, labeled]
@@ -14,8 +16,9 @@ permissions:
 
 # Supersession: a new push to the same PR replaces that PR's in-flight CI
 # instead of letting superseded heads keep the full hosted-runner fan-out, and
-# main pushes share one group so only the newest merge's run finishes; it
-# covers the merges before it, each of which passed the full suite as a PR.
+# pushes to one branch (main, or the fork integration branch inkayat-main)
+# share one group so only that branch's newest merge's run finishes; it covers
+# the merges before it, each of which passed the full suite as a PR.
 # A label other than full-ci gets a unique, non-cancelling group, so adding
 # one never cancels a running suite. Evidence and rationale: the September 12
 # Actions starvation report, section 3 "Workflow mechanics to ship first", and
@@ -23,7 +26,7 @@ permissions:
 # The compliance workflow deliberately keeps its own event-specific groups; do
 # not collapse it onto this simpler shape.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ (github.event_name == 'push' && 'main') || (github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id) || github.event.pull_request.number }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ (github.event_name == 'push' && github.ref_name) || (github.event.action == 'labeled' && github.event.label.name != 'full-ci' && github.run_id) || github.event.pull_request.number }}
   cancel-in-progress: ${{ !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') }}
 
 # Timeout policy: docs/fm-test-portable-shards.md "Timeouts" owns the three
@@ -40,7 +43,7 @@ concurrency:
 # the variables.
 #
 # Outside pull request gate: the full suite (lint, every test lane, macOS and
-# the timing aggregate) runs on main pushes, PRs from this repository's own
+# the timing aggregate) runs on main and inkayat-main pushes, PRs from this repository's own
 # branches, PRs whose author has write access (OWNER, MEMBER, COLLABORATOR),
 # and PRs carrying the full-ci label, which the maintainer or their fleet adds
 # when a PR is picked up for review. Any other PR runs only the coverage guard

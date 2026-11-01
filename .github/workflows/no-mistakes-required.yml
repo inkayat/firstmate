@@ -1,11 +1,14 @@
 name: Require no-mistakes
 run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
+# inkayat-main is this fork's integration branch: pull requests into it carry
+# the same no-mistakes attestation requirement as pull requests into main.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
+      - inkayat-main
 
 permissions:
   contents: read
