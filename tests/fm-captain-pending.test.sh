@@ -212,3 +212,176 @@ assert_equals "2026-10-30T09:15:00Z" "$(field "$(item "$view" waiting_on_captain
 assert_equals "2026-10-29" "$(field "$(item "$view" waiting_on_captain dated)" '.created')" \
   "a hold without a hold-set time keeps its since date"
 pass "a captain hold is created at its hold-set time when one is recorded"
+
+# --- request generations, buckets, and exact counts ---------------------------
+sha256_hex() {  # <text>
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+encoded() {  # <reason>
+  # shellcheck source=bin/fm-hold-reason-lib.sh
+  # shellcheck disable=SC1091
+  (. "$ROOT/bin/fm-hold-reason-lib.sh" && fm_hold_reason_encode "$1")
+}
+home=$(make_home generations)
+live_reason=$'Pick (A) or B?\nNotes: café ✓'
+cat > "$home/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+## Queued
+- [ ] live-a - Live   call see https://example.com/x (repo: alpha) (since 2026-10-30) (hold: $(encoded "$live_reason")) (hold-kind: captain)
+  Captain hold set: 2026-10-30T09:15:00Z
+- [ ] reheld - Re-held call (repo: alpha) (since 2026-10-30) (hold: choose again) (hold-kind: captain)
+  Captain hold set: 2026-10-31T10:00:00Z
+  Resolution recorded by fm-captain-hold.
+  Decision digest: 0000
+  Resolution mode: released
+- [ ] dated - Dated call (repo: alpha) (since 2026-10-30) (hold: later) (hold-kind: captain) (hold-until: 2099-01-01)
+  Captain hold set: 2026-10-30T09:15:00Z
+- [ ] aged - Aged call (repo: alpha) (since 2020-01-01) (hold: old question) (hold-kind: captain)
+  Captain hold set: 2020-01-01T00:00:00Z
+- [ ] expired - Expired call (repo: alpha) (since 2026-10-30) (hold: revisit) (hold-kind: captain) (hold-until: 2020-01-01)
+  Captain hold set: 2026-10-30T09:15:00Z
+- [ ] gated - Gated call blocked-by: open-dep (repo: alpha) (since 2026-10-30) (hold: needs dep) (hold-kind: captain)
+  Captain hold set: 2026-10-30T09:15:00Z
+- [ ] open-dep - Dependency (repo: alpha) (since 2026-10-30)
+- [ ] parked-one - Parked work (repo: alpha) (since 2026-10-30) (hold: captain said stop) (hold-kind: parked)
+- [ ] ext-one - External (repo: alpha) (since 2026-10-30) (hold: vendor reply) (hold-kind: external)
+## Done
+EOF
+for task in ship-s ship-q; do
+  mkdir -p "$home/projects/$task"
+  fm_write_meta "$home/state/$task.meta" "kind=ship" "worktree=$home/projects/$task" "project=alpha" "harness=claude"
+done
+printf 'needs-decision [key=api]: choose API shape\n' > "$home/state/ship-s.status"
+printf 'needs-decision [key=z]: old question\npaused: waiting for upstream release\n' > "$home/state/ship-q.status"
+pending "$home" add --kind question -- "Ship on Friday?" >/dev/null
+view=$(pending "$home" list --json) || fail "generation list failed"
+
+bucket_of() {  # <id> [<key>]
+  printf '%s' "$view" | jq -r --arg id "$1" --arg key "${2:-}" \
+    'first(.waiting_on_captain[], .paused_by_captain_order[], .paused_other_reason[]
+       | select(.id == $id and ($key == "" or .key == $key))) | "\(.bucket)|\(.generation)|\(.reply.answer_to // "-")"'
+}
+live_gen="2026-10-30T09:15:00Z#0#$(sha256_hex "Live call see"$'\n'"$live_reason")"
+assert_equals "live|$live_gen|backlog:live-a@$live_gen" "$(bucket_of live-a)" \
+  "a live hold's generation is its hold-set stamp, answer count, and the digest of its title and decoded reason"
+reheld_gen="2026-10-31T10:00:00Z#1#$(sha256_hex $'Re-held call\nchoose again')"
+assert_equals "live|$reheld_gen|backlog:reheld@$reheld_gen" "$(bucket_of reheld)" \
+  "a re-held call counts the answers already recorded on it"
+assert_equals "deferred|2026-10-30T09:15:00Z#0#$(sha256_hex $'Dated call\nlater')|backlog:dated@2026-10-30T09:15:00Z#0#$(sha256_hex $'Dated call\nlater')" \
+  "$(bucket_of dated)" "a deferred hold keeps its generation and stays answerable"
+assert_equals needs_recheck "$(bucket_of aged | cut -d'|' -f1)" "an aged hold is a re-check, not gone"
+assert_equals needs_recheck "$(bucket_of expired | cut -d'|' -f1)" "a hold past its deferral date is a re-check"
+assert_equals blocked "$(bucket_of gated | cut -d'|' -f1)" "a blocked hold stays blocked"
+assert_equals 'parked|null|-' "$(bucket_of parked-one)" "parked work carries no generation and takes no console reply"
+assert_equals 'other|null|-' "$(bucket_of ext-one)" "another hold kind carries no generation and takes no console reply"
+assert_equals 'live|cp-1|ledger:cp-1@cp-1' "$(bucket_of cp-1)" "a ledger entry's text never changes, so its id is its generation"
+assert_equals 'live|null|-' "$(bucket_of ship-s api)" \
+  "a status decision has no opening-event identity, so it carries no generation and takes no console reply"
+assert_equals 'stale|null|-' "$(bucket_of ship-q z)" "a shadowed status decision is its own bucket"
+assert_equals '4|2|1|1|1|1|1|11' \
+  "$(field "$view" '.counts | "\(.live)|\(.needs_recheck)|\(.deferred)|\(.blocked)|\(.parked)|\(.other)|\(.stale)|\(.total)"')" \
+  "exact counts per bucket, summing to the total"
+pass "every pending item carries a bucket, and replyable requests a generation and answer reference"
+
+# An in-place re-hold that rewrites the reason keeps the stamp and answer count
+# but must change the generation; rewriting it back restores the generation.
+sed -i.bak "s/(hold: later)/(hold: later, after launch)/" "$home/data/backlog.md"
+view=$(pending "$home" list --json) || fail "rewritten list failed"
+assert_equals "deferred|2026-10-30T09:15:00Z#0#$(sha256_hex $'Dated call\nlater, after launch')" \
+  "$(bucket_of dated | cut -d'|' -f1-2)" "a rewritten reason changes the generation under the same stamp"
+pass "a reason rewritten in place changes the generation"
+
+# --- ledger answers through the console's answer notes -------------------------
+inbox() {  # <home> <args...>
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash "$ROOT/bin/fm-inbox.sh" "$@"
+}
+answer_note() {  # <home> <reply-id> <answer-to> <words>: prints the note id
+  printf '%s' "$4" | inbox "$1" note --request-id "$2" --answer-to "$3" --json - | jq -r .id
+}
+note_outcome() {  # <home> <note-id>
+  inbox "$1" show --json "$2" | jq -r '.outcome.outcome // "none"'
+}
+home=$(make_home ledger-notes)
+pending "$home" add --kind question -- "Ship on Friday?" >/dev/null
+pending "$home" add --kind approval -- "Approve the release notes" >/dev/null
+n1=$(answer_note "$home" reply-1 ledger:cp-1@cp-1 $'Yes, Friday.\n(After the demo.)')
+pending "$home" answer cp-1 --note-ref "$n1" >/dev/null || fail "a ledger answer note did not apply"
+shown=$(pending "$home" show --json cp-1)
+assert_equals $'answered|Yes, Friday.\n(After the demo.)|'"$n1" "$(field "$shown" '"\(.status)|\(.note)|\(.note_ref)"')" \
+  "the ledger entry records the captain's words and the note they came from"
+assert_equals answered "$(note_outcome "$home" "$n1")" "the applied outcome is not on the note"
+pending "$home" answer cp-1 --note-ref "$n1" >/dev/null || fail "an exact replay of a ledger answer was not idempotent"
+assert_equals 1 "$(grep -c '"event":"answer"' "$home/data/captain-pending.jsonl")" "a replay appended a second answer"
+n2=$(answer_note "$home" reply-2 ledger:cp-1@cp-1 "No.")
+expect_exit 4 pending "$home" answer cp-1 --note-ref "$n2"
+assert_equals already-closed "$(note_outcome "$home" "$n2")" "a late second reply is not marked already closed"
+n3=$(answer_note "$home" reply-3 ledger:cp-2@cp-2 "Not needed any more.")
+expect_exit 1 pending "$home" answer cp-1 --note-ref "$n3"
+pending "$home" drop cp-2 --note-ref "$n3" >/dev/null || fail "a ledger drop by answer note did not apply"
+assert_equals 'dropped|dropped' "$(field "$(pending "$home" show --json cp-2)" .status)|$(note_outcome "$home" "$n3")" \
+  "the drop is recorded on the entry and the note"
+n4=$(answer_note "$home" reply-4 ledger:cp-9@cp-9 "Whatever this was.")
+expect_exit 4 pending "$home" answer cp-9 --note-ref "$n4"
+assert_equals not-found "$(note_outcome "$home" "$n4")" "an unknown entry is not marked not-found"
+assert_equals 0 "$(field "$(pending "$home" list --json --ledger-only)" .counts.live)" "answered and dropped entries still count"
+pass "a ledger entry is answered or dropped by its answer note once, with the outcome on the note"
+
+# --- honest coverage: an unread backlog backend or secondmate is never a zero ---
+home=$(make_home other-backend)
+printf 'backend = "beads"\n' > "$home/.tasks.toml"
+cat > "$home/data/backlog.md" <<EOF2
+## In flight
+## Queued
+- [ ] stale-call - Stale markdown call (repo: alpha) (since 2026-10-30) (hold: pick one) (hold-kind: captain)
+  Captain hold set: 2026-10-30T09:15:00Z
+## Done
+EOF2
+pending "$home" add --kind question -- "Ship on Friday?" >/dev/null
+view=$(pending "$home" list --json) || fail "a home on another backlog backend could not be listed"
+assert_equals 'false|backlog|1|0' \
+  "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))|\(.counts.live)|\([.waiting_on_captain[] | select(.source == "backlog")] | length)"')" \
+  "captain holds on a backlog backend the view does not read are unknown, and no stale markdown row stands in for them"
+assert_contains "$(field "$view" '.coverage.missing[0].reason')" "beads" "the reason does not name the unread backend"
+assert_contains "$(pending "$home" list)" "INCOMPLETE" "the human view does not say it is incomplete"
+pass "a backlog backend the view cannot read leaves its captain holds unknown, never zero"
+
+mate_summary() {  # <mate-home> <decisions-shown> <decisions-total>
+  jq -n --arg home "$1" --argjson shown "$2" --argjson total "$3" --argjson epoch "$(date +%s)" '{
+    schema:"fm-secondmate-home-summary.v1", hold_classifier_schema:"fm-captain-hold-buckets.v1",
+    generated:(now | todate), generated_epoch:$epoch, home:$home, valid:true, reason:null,
+    invalidity:{kind:null, ids:[]}, state:"captain_decision", active_children:[],
+    decisions_open:[range(0; $shown) | {id:"call-\(.)", key:"call-\(.)", verb:"captain-hold", summary:"Call \(.)",
+      reason:"choose", hold_until:null, hold_bucket:"live", hold_age_days:null, source:"backlog"}],
+    holds:[], queued:[], landed:[], endpoints:[],
+    counts:{active_children:0, decisions_open:$total, holds:0, queued:0, landed:0, endpoints:0}, omitted:[]}' \
+    > "$1/state/home-summary.json"
+}
+home=$(make_home secondmates)
+for m in mate-a mate-b; do
+  mkdir -p "$TMP_ROOT/$m/data" "$TMP_ROOT/$m/state" "$TMP_ROOT/$m/config" "$TMP_ROOT/$m/projects" "$TMP_ROOT/$m/bin"
+  printf '# fixture\n' > "$TMP_ROOT/$m/AGENTS.md"
+  printf '%s\n' "$m" > "$TMP_ROOT/$m/.fm-secondmate-home"
+done
+printf -- '- mate-a - fixture (home: %s; scope: fixture; projects: alpha; added 2026-10-30)\n' "$TMP_ROOT/mate-a" > "$home/data/secondmates.md"
+mate_summary "$TMP_ROOT/mate-a" 1 1
+view=$(pending "$home" list --json) || fail "a home with a fully read secondmate could not be listed"
+assert_equals 'true|' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a fully read secondmate leaves the view complete"
+mate_summary "$TMP_ROOT/mate-a" 1 3
+printf -- '- mate-b - fixture (home: %s; scope: fixture; projects: alpha; added 2026-10-30)\n' "$TMP_ROOT/mate-b" >> "$home/data/secondmates.md"
+view=$(pending "$home" list --json) || fail "a home with unread secondmates could not be listed"
+assert_equals 'false|secondmate:mate-a,secondmate:mate-b' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a secondmate whose captain calls were cut, or whose summary is unreadable, leaves the view incomplete"
+assert_contains "$(field "$view" '.coverage.missing[0].reason')" "1 of 3" "the cut is not disclosed"
+view=$(FM_SNAPSHOT_SECONDMATES=1 pending "$home" list --json) || fail "a bounded secondmate read could not be listed"
+assert_contains "$(field "$view" '[.coverage.missing[].source] | join(",")')" "secondmates" \
+  "secondmates beyond the snapshot bound are not disclosed"
+pass "an unread or truncated secondmate leaves the view incomplete instead of counting it as complete"

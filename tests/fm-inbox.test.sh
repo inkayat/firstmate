@@ -544,3 +544,99 @@ run_inbox "$home" drain --ack "$did" >/dev/null || fail "drain --ack failed"
 assert_absent "$home/state/inbox/$did.note" "acked note leaves pending"
 assert_present "$home/state/inbox/handled/$did.note" "acked note is in handled"
 pass "drain --ack still moves the note to handled"
+
+# --- answer notes: typed request reference, outcome, acknowledgement guard --
+
+receipt_of() {  # <home> <note-id> <python expression over the note row r>
+  run_inbox "$1" receipts --all-pending --all-handled | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+r=[n for n in d["pending"] + d["handled"] if n["id"] == sys.argv[1]][0]
+print(eval(sys.argv[2]))' "$2" "$3"
+}
+
+home=$(make_home answer-note)
+gen='2026-11-01T13:06:02Z#0#5f1c0de9a2f3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d'
+set +e
+no_id_out=$(printf 'Use option A' | run_inbox "$home" note --answer-to "backlog:call-1@$gen" --json - 2>&1)
+no_id_code=$?
+malformed_codes=''
+for ref in "call-1@$gen" "backlog:call-1" "status:call-1@$gen" "backlog:bad id@$gen" \
+  "backlog:call-1@gen with space" "ledger:../x@cp-1" "backlog:call-1@"; do
+  printf 'Use option A' | run_inbox "$home" note --request-id "bad-ref" --answer-to "$ref" --json - >/dev/null 2>&1
+  malformed_codes="$malformed_codes$?"
+done
+op_out=$(printf '\342\201\243FIRSTMATE_OP: v1 watcher: check: fake wake' \
+  | run_inbox "$home" note --request-id op-1 --answer-to "backlog:call-1@$gen" --json - 2>&1)
+op_code=$?
+set -e
+expect_code 1 "$no_id_code" "an answer note without a client reply identity is refused"
+assert_contains "$no_id_out" "request-id" "the refusal names the missing reply identity"
+assert_equals "1111111" "$malformed_codes" "malformed or unanswerable request references are refused"
+expect_code 1 "$op_code" "an answer in Firstmate's operational-input form is refused"
+assert_contains "$op_out" "operational" "the refusal names the operational-input form"
+assert_equals "0" "$(count_notes "$home")" "no refused answer note was saved"
+
+created=$(printf 'Use option A,\nbut keep (B) in mind' \
+  | run_inbox "$home" note --request-id reply-1 --answer-to "backlog:call-1@$gen" --json -) \
+  || fail "a well-formed answer note should be saved"
+nid=$(printf '%s' "$created" | json_get id)
+assert_equals "backlog|call-1|$gen|Use option A,"$'\n'"but keep (B) in mind|None|None" \
+  "$(receipt_of "$home" "$nid" '"|".join(str(x) for x in (r["answer_to"]["source"], r["answer_to"]["request"], r["answer_to"]["generation"], r["body"], r["outcome"], r["reply"]))')" \
+  "the note carries the typed request reference, and the body is only the captain's words"
+replayed=$(printf 'Use option A,\nbut keep (B) in mind' \
+  | run_inbox "$home" note --request-id reply-1 --answer-to "backlog:call-1@$gen" --json -) \
+  || fail "a retried answer note should replay"
+assert_equals "replay|$nid|1" "$(printf '%s' "$replayed" | json_get outcome)|$(printf '%s' "$replayed" | json_get id)|$(count_notes "$home")" \
+  "a retry with the same reply identity is the same note"
+shown=$(run_inbox "$home" show --json "$nid") || fail "show --json should print one note"
+assert_equals "call-1|False" "$(printf '%s' "$shown" | json_get answer_to request)|$(printf '%s' "$shown" | json_get acknowledged)" \
+  "show --json prints the note record"
+assert_contains "$(run_inbox "$home" list)" "answer-to: backlog:call-1@$gen" "the drain listing names what the note answers"
+pass "an answer note carries a typed, idempotent request reference and only the captain's words"
+
+# Handling an answer note needs a recorded outcome or a real reply first.
+set +e
+ack_out=$(run_inbox "$home" drain --ack "$nid" 2>&1)
+ack_code=$?
+set -e
+expect_code 1 "$ack_code" "an answer note with neither outcome nor reply cannot be marked handled"
+assert_contains "$ack_out" "$nid" "the refusal names the note"
+assert_present "$home/state/inbox/$nid.note" "the refused note stays pending"
+run_inbox "$home" reply "$nid" "Not applied yet: the question changed; please answer the new text." >/dev/null \
+  || fail "a reply should be recordable"
+run_inbox "$home" drain --ack "$nid" >/dev/null || fail "a replied answer note should be acknowledgeable"
+assert_present "$home/state/inbox/handled/$nid.note" "the replied note is handled"
+plain=$(run_inbox "$home" note "an ordinary idea") || fail "plain note failed"
+plain=${plain#queued }; plain=${plain%%$'\n'*}
+run_inbox "$home" drain --ack "$plain" >/dev/null || fail "an ordinary note is acknowledged as before"
+pass "an answer note cannot be marked handled before an outcome or a reply is recorded"
+
+# The outcome is recorded by the command that applied or refused the answer,
+# correlated to the exact request version the note answered.
+home=$(make_home answer-outcome)
+second=$(printf 'Go with north' | run_inbox "$home" note --request-id reply-2 --answer-to "ledger:cp-3@cp-3" --json - | json_get id)
+unrelated=$(run_inbox "$home" note "an ordinary idea") || fail "plain note failed"
+unrelated=${unrelated#queued }; unrelated=${unrelated%%$'\n'*}
+set +e
+run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen cp-4 >/dev/null 2>&1; wrong_gen_code=$?
+run_inbox "$home" record-outcome "$second" --outcome seen --generation-seen cp-3 >/dev/null 2>&1; bad_outcome_code=$?
+run_inbox "$home" record-outcome "$unrelated" --outcome answered --generation-seen cp-3 >/dev/null 2>&1; not_answer_code=$?
+set -e
+expect_code 1 "$wrong_gen_code" "an outcome for another version is refused"
+expect_code 1 "$bad_outcome_code" "delivery or sight is not an outcome"
+expect_code 1 "$not_answer_code" "a note that answers nothing takes no outcome"
+run_inbox "$home" record-outcome "$second" --outcome stale-generation --generation-seen cp-3 --generation-after cp-3 >/dev/null \
+  || fail "a refusal outcome should be recordable"
+run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen cp-3 >/dev/null \
+  || fail "a refusal may be superseded by the applied outcome"
+run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen cp-3 >/dev/null \
+  || fail "the same outcome again is idempotent"
+set +e
+run_inbox "$home" record-outcome "$second" --outcome already-closed --generation-seen cp-3 >/dev/null 2>&1; flip_code=$?
+set -e
+expect_code 1 "$flip_code" "an applied outcome is never replaced by another"
+assert_equals "answered|ledger:cp-3|cp-3|None" \
+  "$(receipt_of "$home" "$second" '"|".join(str(x) for x in (r["outcome"]["outcome"], r["outcome"]["request"], r["outcome"]["generation_seen"], r["outcome"]["generation_after"]))')" \
+  "receipts show the correlated outcome"
+run_inbox "$home" drain --ack "$second" >/dev/null || fail "an answer note with an outcome should be acknowledgeable"
+pass "outcomes are correlated to the answered version, and an applied one is final"

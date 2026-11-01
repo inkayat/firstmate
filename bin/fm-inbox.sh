@@ -20,11 +20,14 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
-#   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
+#   fm-inbox.sh note [--request-id <id>] [--answer-to <ref>] [--json] [--] <text>...
+#   fm-inbox.sh note [--request-id <id>] [--answer-to <ref>] [--json] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
+#   fm-inbox.sh show --json <id>
+#   fm-inbox.sh record-outcome <id> --outcome <outcome> --generation-seen <generation> \
+#     [--generation-after <generation>]
 #   fm-inbox.sh ready
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
@@ -65,6 +68,27 @@
 # `drain --ack` marks a note handled by moving it to handled/; until then
 # bin/fm-wake-drain.sh refuses to acknowledge the note's wake (its header owns
 # that guard), so answer the note where owed, ack it here, then ack the wake.
+#
+# ANSWER NOTES. `note --answer-to <source>:<request-id>@<generation>` makes the
+# note the captain's answer to one pending request at one version, exactly as
+# `bin/fm-captain-pending.sh list --json` (or the console signals file) names it
+# in that request's `reply.answer_to`: source `backlog` (a captain hold) or
+# `ledger` (a captain-pending entry), its id, and its generation. The note is
+# written to the inbox of the home that owns the request, records the reference
+# as typed header fields, and its body stays the captain's words alone. It
+# requires --request-id, the console's reply identity reused on every retry, and
+# refuses a body in Firstmate's operational-input form
+# (bin/fm-operational-input.sh). Saving, announcing, or acknowledging such a note
+# changes no request: only the apply command does
+# (bin/fm-captain-hold.sh answer --note-ref, bin/fm-captain-pending.sh
+# answer|drop --note-ref), which checks the version and then records the
+# outcome against the note with `record-outcome`: answered, released, partial,
+# or dropped when it applied; stale-generation, already-closed, or not-found
+# when it refused. An applied outcome is final; a refusal may later be
+# superseded. Record outcomes only through those commands, never by hand.
+# `drain --ack` refuses an answer note that has neither an outcome nor a
+# `reply`, so it can never leave the pending inbox unapplied and unanswered.
+# `receipts` and `show --json` carry each note's `answer_to` and `outcome`.
 # `ready` is the read-only primary-readiness projection (lock, wake-consumer
 # health, away posture, observation time). It never acquires the session lock
 # and never infers liveness from a lock file, a session, or a pane.
@@ -84,18 +108,19 @@
 # An absent profile means the call uses whatever credentials are already in the
 # environment, which is also what FM_INBOX_PROFILE= (empty) forces.
 #
-# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain`
-# need NO configuration at all, because they make no model call. The voice
-# handover depends on `note`, so it keeps working in a home that has configured
-# nothing. `--json` / `receipts` / `ready` require python3, which a firstmate
-# home already uses for other tools.
+# `note`, `announce`, `reply`, `receipts`, `show`, `record-outcome`, `ready`,
+# `status`, `list` and `drain` need NO configuration at all, because they make
+# no model call. The voice handover depends on `note`, so it keeps working in a
+# home that has configured nothing. `--json` / `receipts` / `show` /
+# `record-outcome` / `ready` require python3, which a firstmate home already
+# uses for other tools.
 #
 # Environment:
 #   FM_HOME              operational home whose state/ and data/ are used.
 #
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
-# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain`
-# make no network call at all.
+# `note`, `announce`, `reply`, `receipts`, `show`, `record-outcome`, `ready`,
+# `status`, `list` and `drain` make no network call at all.
 #
 # `note` is also the queueing half of the spoken interface: when the voice agent
 # in bin/fm-voice-relay.py hands real work over to firstmate, it runs this
@@ -199,8 +224,12 @@ aws_call() {
 REQUESTS="$INBOX/.requests"
 ANNOUNCED_DIR="$INBOX/.announced"
 REPLIES="$INBOX/.replies"
+OUTCOMES="$INBOX/.outcomes"
 
 REPLY_SEQ_LOCK="$INBOX/.replies.lock"
+OUTCOME_LOCK="$INBOX/.outcomes.lock"
+APPLIED_OUTCOMES="answered released partial dropped"
+REFUSED_OUTCOMES="stale-generation already-closed not-found"
 
 RECEIPTS_PENDING_BOUND=20
 RECEIPTS_HANDLED_BOUND=20
@@ -248,6 +277,56 @@ note_path() {  # <id>
   else
     return 1
   fi
+}
+
+# One header field of a note record, from the lines before its `--` separator.
+note_header() {  # <path> <key>
+  awk -v key="$2" '/^--$/ { exit } index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$1"
+}
+
+valid_request_slug() {  # <id>
+  case "$1" in
+    ''|.*|*..*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 128 ]
+}
+
+valid_generation() {  # <generation>
+  case "$1" in
+    ''|*[!A-Za-z0-9:#._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 200 ]
+}
+
+# Parse <source>:<request-id>@<generation> into ANSWER_SOURCE, ANSWER_REQUEST,
+# and ANSWER_GENERATION; only a captain hold or a ledger entry is answerable.
+parse_answer_to() {  # <ref>
+  local rest
+  case "$1" in
+    backlog:*@*|ledger:*@*) ;;
+    *) return 1 ;;
+  esac
+  ANSWER_SOURCE=${1%%:*}
+  rest=${1#*:}
+  ANSWER_REQUEST=${rest%%@*}
+  ANSWER_GENERATION=${rest#*@}
+  valid_request_slug "$ANSWER_REQUEST" && valid_generation "$ANSWER_GENERATION"
+}
+
+# 0 when <body> is in Firstmate's operational-input form, 1 when it is not.
+body_is_operational() {  # <body>
+  local script="$FM_ROOT/bin/fm-operational-input.sh" mode rc
+  [ -r "$script" ] || die "cannot classify the answer: missing $script"
+  for mode in classify doorbell-kind; do
+    rc=0
+    printf '%s' "$1" | bash "$script" "$mode" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+      0) return 0 ;;
+      1) ;;
+      *) die "cannot classify the answer: $mode exited $rc" ;;
+    esac
+  done
+  return 1
 }
 
 note_announced() {  # <id>
@@ -472,33 +551,50 @@ queue_note() {
   finish_note_result created "$id" "" "$json" "$strict" "$summary"
 }
 
+NOTE_USAGE="usage: fm-inbox.sh note [--request-id <id>] [--answer-to <source>:<request-id>@<generation>] [--json] [--] <text>... (or: note -)"
+
 cmd_note() {
-  local body json=0 request_id=""
+  local body json=0 request_id="" answer_to="" extra=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
       --request-id)
-        [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
+        [ "$#" -ge 2 ] || die "$NOTE_USAGE"
         request_id=$2
         valid_request_id "$request_id" \
           || die "invalid request id (use 1-128 characters: A-Za-z0-9._:-)"
         shift 2
         ;;
+      --answer-to)
+        [ "$#" -ge 2 ] || die "$NOTE_USAGE"
+        answer_to=$2
+        parse_answer_to "$answer_to" \
+          || die "invalid --answer-to (use backlog:<task-id>@<generation> or ledger:<cp-id>@<generation>, exactly as the request's reply.answer_to names it)"
+        shift 2
+        ;;
       --) shift; break ;;
-      -h|--help) die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)" ;;
+      -h|--help) die "$NOTE_USAGE" ;;
       *) break ;;
     esac
   done
   if [ "$#" -eq 0 ]; then
-    die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
+    die "$NOTE_USAGE"
   elif [ "$1" = "-" ]; then
-    [ "$#" -eq 1 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] -"
+    [ "$#" -eq 1 ] || die "$NOTE_USAGE"
     body=$(cat; printf .)
     body=${body%.}
   else
     body="$*"
   fi
-  queue_note text "$body" "" "$request_id" "$json"
+  if [ -n "$answer_to" ]; then
+    [ -n "$request_id" ] \
+      || die "an answer note needs --request-id: the console's reply identity, reused on every retry"
+    ! body_is_operational "$body" \
+      || die "refusing an answer in Firstmate's operational-input form"
+    extra=$(printf 'answer_source=%s\nanswer_request=%s\nanswer_generation=%s' \
+      "$ANSWER_SOURCE" "$ANSWER_REQUEST" "$ANSWER_GENERATION")
+  fi
+  queue_note text "$body" "$extra" "$request_id" "$json"
 }
 
 cmd_announce() {
@@ -671,11 +767,25 @@ cmd_receipts() {
       *) die "usage: fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]" ;;
     esac
   done
+  receipts_view "$after" "$all_pending" "$all_handled" "$all_replies" ""
+}
+
+cmd_show() {
+  local id
+  [ "${1:-}" = --json ] && [ "$#" -eq 2 ] || die "usage: fm-inbox.sh show --json <id>"
+  id=$2
+  valid_note_id "$id" || die "invalid note id"
+  note_path "$id" >/dev/null || die "no such note: $id"
+  receipts_view "" 1 1 1 "$id"
+}
+
+# The receipts document, or with <show-id> that one note's record.
+receipts_view() {  # <after> <all-pending> <all-handled> <all-replies> <show-id>
   need_python
   python3 - "$INBOX" "$ANNOUNCED_DIR" "$REPLIES" "$FM_HOME" \
     "$RECEIPTS_PENDING_BOUND" "$RECEIPTS_HANDLED_BOUND" "$RECEIPTS_REPLIES_BOUND" \
-    "$all_pending" "$all_handled" "$all_replies" "$after" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+    "$2" "$3" "$4" "$1" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OUTCOMES" "$5" <<'PY'
 import json, os, sys
 from pathlib import Path
 
@@ -688,6 +798,8 @@ all_handled = sys.argv[9] == "1"
 all_replies = sys.argv[10] == "1"
 after = sys.argv[11]
 generated = sys.argv[12]
+outcomes_dir = sys.argv[13]
+show_id = sys.argv[14]
 
 # A record that vanishes between listing and reading - drain --ack moving a
 # note to handled/ - is skipped, and undecodable bytes are replaced, so one bad
@@ -731,6 +843,11 @@ def list_notes(folder):
             "at": meta.get("at"),
             "source": meta.get("source"),
             "request_id": meta.get("request_id"),
+            "answer_to": {
+                "source": meta.get("answer_source"),
+                "request": meta.get("answer_request"),
+                "generation": meta.get("answer_generation"),
+            } if meta.get("answer_request") else None,
             "announce_marker": meta.get("announce_marker") == "1",
             "body": body,
             "path": str(path),
@@ -761,6 +878,23 @@ def reply_record(note_id):
         "cursor": "%012d" % int(raw_seq),
     }
 
+# The outcome the apply command recorded against an answer note, or None.
+malformed_outcomes = []
+
+def outcome_record(note_id):
+    path = Path(outcomes_dir) / note_id
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        malformed_outcomes.append(note_id)
+        return None
+    if not isinstance(record, dict):
+        malformed_outcomes.append(note_id)
+        return None
+    return {k: record.get(k) for k in ("outcome", "request", "generation_seen", "generation_after", "at")}
+
 # announced is null - not false - for a note written before this home tracked
 # announcement markers: it appended its own wake at creation and left no record
 # of it, so "not announced" is not something anyone can read off this state.
@@ -775,6 +909,7 @@ def enrich(note, acknowledged):
     else:
         rec["announced"] = None
     rec["reply"] = reply_record(note_id)
+    rec["outcome"] = outcome_record(note_id)
     rec.pop("path", None)
     rec.pop("announce_marker", None)
     return rec
@@ -786,6 +921,14 @@ handled_notes = list_notes(Path(inbox) / "handled")
 handled_ids = {n["id"] for n in handled_notes}
 pending_all = [enrich(n, False) for n in pending_notes if n["id"] not in handled_ids]
 handled_all = [enrich(n, True) for n in handled_notes]
+
+if show_id:
+    found = [n for n in handled_all + pending_all if n["id"] == show_id]
+    if not found:
+        sys.exit(1)
+    json.dump(dict({"schema": "fm-inbox-note-record.v1"}, **found[0]), sys.stdout, separators=(",", ":"))
+    sys.stdout.write("\n")
+    sys.exit(0)
 
 def bound_list(rows, limit, unlimited):
     if unlimited or limit <= 0 or len(rows) <= limit:
@@ -829,6 +972,12 @@ if malformed_replies:
         "surface": "malformed replies without a valid sequence: %d (%s)"
             % (len(malformed_replies), ", ".join(sorted(malformed_replies))),
         "reveal": "inspect %s" % replies_dir,
+    })
+if malformed_outcomes:
+    omitted.append({
+        "surface": "unreadable answer outcomes: %d (%s)"
+            % (len(malformed_outcomes), ", ".join(sorted(malformed_outcomes))),
+        "reveal": "inspect %s" % outcomes_dir,
     })
 
 home_label = "/".join(Path(home).parts[-2:]) if home else home
@@ -1102,15 +1251,96 @@ PY
     || die "ask failed"
 }
 
+# ---------------------------------------------------------------- outcome
+
+OUTCOME_USAGE="usage: fm-inbox.sh record-outcome <id> --outcome <outcome> --generation-seen <generation> [--generation-after <generation>]"
+
+# Called by the commands that apply or refuse an answer note, never by hand:
+# the outcome is the durable result of that apply against this exact note.
+cmd_record_outcome() {
+  local id=${1:-} outcome='' seen='' after='' path source request generation rc=0
+  [ -n "$id" ] || die "$OUTCOME_USAGE"
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --outcome) [ "$#" -ge 2 ] || die "$OUTCOME_USAGE"; outcome=$2; shift 2 ;;
+      --generation-seen) [ "$#" -ge 2 ] || die "$OUTCOME_USAGE"; seen=$2; shift 2 ;;
+      --generation-after) [ "$#" -ge 2 ] || die "$OUTCOME_USAGE"; after=$2; shift 2 ;;
+      *) die "$OUTCOME_USAGE" ;;
+    esac
+  done
+  valid_note_id "$id" || die "invalid note id"
+  path=$(note_path "$id") || die "no such note: $id"
+  case " $APPLIED_OUTCOMES $REFUSED_OUTCOMES " in
+    *" ${outcome:-none} "*) ;;
+    *) die "unknown outcome '$outcome' (one of: $APPLIED_OUTCOMES $REFUSED_OUTCOMES)" ;;
+  esac
+  source=$(note_header "$path" answer_source)
+  request=$(note_header "$path" answer_request)
+  generation=$(note_header "$path" answer_generation)
+  [ -n "$request" ] || die "note $id answers no request"
+  [ "$seen" = "$generation" ] \
+    || die "note $id answers $source:$request@$generation, not generation $seen"
+  [ -z "$after" ] || valid_generation "$after" || die "invalid --generation-after"
+  need_python
+  mkdir -p "$OUTCOMES"
+  load_wake_lib || die "recording an outcome needs $FM_ROOT/bin/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$OUTCOME_LOCK" || die "could not lock $OUTCOME_LOCK"
+  python3 - "$OUTCOMES/$id" "$id" "$source:$request" "$seen" "$outcome" "$after" \
+    "$APPLIED_OUTCOMES" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY' || rc=$?
+import json, os, sys, tempfile
+path, note_id, request, seen, outcome, after, applied, at = sys.argv[1:9]
+after = after or None
+old = None
+if os.path.lexists(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            old = json.load(f)
+    except (OSError, ValueError):
+        old = None
+    if not isinstance(old, dict):
+        sys.stderr.write("fm-inbox: the outcome record of note %s is unreadable; inspect %s\n" % (note_id, path))
+        sys.exit(1)
+    # The same applied outcome again is a retry: the first record stands.
+    if old.get("outcome") == outcome and (old.get("generation_after") == after or outcome in applied.split()):
+        print("outcome-unchanged %s %s" % (note_id, outcome))
+        sys.exit(0)
+    if old.get("outcome") in applied.split():
+        sys.stderr.write("fm-inbox: note %s already records the applied outcome %s, which is final\n"
+                         % (note_id, old.get("outcome")))
+        sys.exit(1)
+record = {"schema": "fm-inbox-outcome.v1", "note": note_id, "request": request,
+          "generation_seen": seen, "outcome": outcome, "generation_after": after, "at": at}
+fd, tmp = tempfile.mkstemp(prefix=".staging-", dir=os.path.dirname(path))
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(record, f, separators=(",", ":"))
+    f.write("\n")
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, path)
+print("outcome %s %s" % (note_id, outcome))
+PY
+  fm_lock_release "$OUTCOME_LOCK"
+  return "$rc"
+}
+
 # ---------------------------------------------------------------- list / drain
 
 cmd_list() {
   [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
-  local any=0
+  local any=0 id request outcome
   for f in "$INBOX"/*.note; do
     [ -e "$f" ] || break
     any=1
-    printf '%s\n' "$(basename "$f" .note)"
+    id=$(basename "$f" .note)
+    printf '%s\n' "$id"
+    request=$(note_header "$f" answer_request)
+    if [ -n "$request" ]; then
+      printf '    answer-to: %s:%s@%s\n' "$(note_header "$f" answer_source)" "$request" \
+        "$(note_header "$f" answer_generation)"
+      outcome=$(sed -n 's/.*"outcome":"\([a-z-]*\)".*/\1/p' "$OUTCOMES/$id" 2>/dev/null || true)
+      printf '    outcome: %s\n' "${outcome:-none recorded}"
+    fi
     sed -n '/^--$/,$p' "$f" | tail -n +2 | sed 's/^/    /'
   done
   [ "$any" -eq 1 ] || printf '(inbox empty)\n'
@@ -1121,16 +1351,23 @@ cmd_drain() {
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
     mkdir -p "$INBOX/handled"
-    local id
+    local id request refused=0
     for id in "$@"; do
       if [ -f "$INBOX/$id.note" ]; then
+        request=$(note_header "$INBOX/$id.note" answer_request)
+        if [ -n "$request" ] && [ ! -f "$OUTCOMES/$id" ] && [ ! -f "$REPLIES/$id" ]; then
+          printf 'fm-inbox: refused %s: it answers %s:%s and has neither an outcome nor a reply; apply it with its --note-ref (which records the outcome) or reply with why it was not applied, then ack it\n' \
+            "$id" "$(note_header "$INBOX/$id.note" answer_source)" "$request" >&2
+          refused=1
+          continue
+        fi
         mv "$INBOX/$id.note" "$INBOX/handled/$id.note"
         printf 'acked %s\n' "$id"
       else
         printf 'already-acked %s\n' "$id"
       fi
     done
-    return 0
+    return "$refused"
   fi
   cmd_list
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
@@ -1143,6 +1380,8 @@ case "${1:-}" in
   announce) shift; cmd_announce "$@" ;;
   reply)    shift; cmd_reply "$@" ;;
   receipts) shift; cmd_receipts "$@" ;;
+  show)     shift; cmd_show "$@" ;;
+  record-outcome) shift; cmd_record_outcome "$@" ;;
   ready)    shift; cmd_ready "$@" ;;
   say)      shift; cmd_say "$@" ;;
   status)   shift; cmd_status ;;

@@ -40,6 +40,10 @@
 #     captain_actionable means "waiting on the captain now" and is exactly
 #     hold_bucket == "live".
 #     hold_age_days is the hold's age when computable, else null.
+#     hold_resolutions counts the resolution records in the row's body, and
+#     hold_generation is an open captain hold's request generation (null
+#     otherwise); bin/fm-hold-reason-lib.sh fm_hold_request_generations owns
+#     that rule, so the combined view and the answer check read one value.
 #     Aging is a projection safety net only: the durable deferral remains
 #     re-holding with --until.
 #     Renderers keep every non-live bucket out of the default Captain's Call,
@@ -561,6 +565,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
                elif .state == "queued" then "queued"
                else "done" end)
           | .requires_child_metadata = (.current_role == "worker")
+          | .hold_resolutions = ([.body_lines[] | select(test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))] | length)
           | .hold_age_days = days_between((.hold_set // .since); $now)
           | .hold_bucket =
               (if .hold_kind != "captain" or .hold_reason == null or .state == "done" then null
@@ -572,7 +577,7 @@ backlog_json() (  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable = (.hold_bucket == "live")
         else . end)
     | del(.section,.order)
-  ' < "$backlog" | fm_hold_reason_decode_stream json
+  ' < "$backlog" | fm_hold_reason_decode_stream json | fm_hold_request_generations
 )
 
 SNAPSHOT_TASK_DIR=

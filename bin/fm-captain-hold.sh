@@ -22,7 +22,8 @@
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
 #     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
-#   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
+#   fm-captain-hold.sh answer <task-id> (--decision-file <path> | --note-ref <note-id>) \
+#     [--release | --remaining-file <path>] [--expect <generation>]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh reconcile-requests --source-id <source-id> --source <provenance>   (task ids on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -74,6 +75,36 @@
 # answered captain call. A hold that expired by date (`--until` in the past) is
 # still answerable: the surviving hold annotations, not tasks-axi's live
 # `held:` bit, prove the captain owned it.
+#
+# `--remaining-file` records a PARTIAL answer: the captain's words for the
+# questions answered go into a `partial` resolution record, and the call stays
+# held with its reason rewritten to the remaining questions in the file (its
+# hold-set stamp and any --until date kept), so it stays listed under a new
+# request generation. The two writes run under the task lock; a reader between
+# them sees an intermediate generation the completed rewrite also supersedes.
+#
+# VERSIONED ANSWERS. `--expect <generation>` applies the answer only while the
+# call is still at that request generation (bin/fm-hold-reason-lib.sh owns the
+# rule; the combined view publishes it), checked under the same per-task
+# control lock `hold` takes, against the value the view's own backlog parser
+# reads now. A call that changed is refused `stale-generation`, one already
+# closed or released `already-closed`, an absent one `not-found`: each prints
+# `<refusal>: <task-id>`, changes nothing, and exits 4. A home whose backlog the
+# view cannot parse gives no generation, so the check refuses (exit 1) rather
+# than guess. `--note-ref <note-id>` applies a console answer note
+# (bin/fm-inbox.sh note --answer-to backlog:<task-id>@<generation>): its
+# generation is the expectation, its body - only the captain's words - is the
+# decision unless --decision-file is given, and the result is recorded on the
+# note (bin/fm-inbox.sh record-outcome): answered, released, or partial when
+# applied, or the refusal above. A versioned record also names the generation
+# and the note, so an exact retry (same words, generation, and note) finishes an
+# interrupted apply or re-records a lost outcome without a second resolution,
+# and a retry after the call was held again changes nothing. The outcome is
+# written after the durable result; when that write fails the command exits 1
+# naming the retry. The lock serializes this script's writers only: a reason
+# edited directly through tasks-axi changes the generation and is refused by
+# any later check, but can race the check-then-apply window itself. Without
+# --expect and --note-ref, `answer` is the unversioned path above, unchanged.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
@@ -182,7 +213,9 @@
 # hold-set stamp and the count of recorded answers - is what distinguishes two
 # successive calls on one task id: re-holding released work starts a new
 # lifecycle without necessarily touching the task's status log, so a consumer
-# that bounds repeated work per call cannot use the task id alone.
+# that bounds repeated work per call cannot use the task id alone. It is not a
+# reply version: an in-place re-hold keeps it, while the request generation
+# (VERSIONED ANSWERS above) also changes with the text the captain is shown.
 # bin/fm-teardown.sh asks it before its automatic
 # backlog close and, on 0, returns the row to Queued with its deliverable
 # recorded instead (bin/fm-backlog-transition-lib.sh owns that transition), so
@@ -197,10 +230,11 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, repaired, or
-# reconciled. Records written by the retired fm-decision-hold.sh (routed,
-# declined, answered, repaired) are recognized everywhere a record is read, so
-# nothing already closed needs rewriting.
+# decision digest, and a `Resolution mode:` of answered, released, partial,
+# repaired, or reconciled; a versioned answer adds `Request generation:` and,
+# from a note, `Answer note:`. Records written by the retired
+# fm-decision-hold.sh (routed, declined, answered, repaired) are recognized
+# everywhere a record is read, so nothing already closed needs rewriting.
 #
 # Parent channel: inside a secondmate home a task held for the captain, and its
 # answer, are captain-facing facts the moment they are recorded, so `hold`
@@ -334,15 +368,18 @@ DECISION_TEXT=''
 DECISION_DIGEST=''
 
 load_decision() {  # <path>; sets DECISION_TEXT and DECISION_DIGEST
-  local path=$1 decision
+  local path=$1
   [ -n "$path" ] || fail "--decision-file is required"
   [ -f "$path" ] || fail "decision file does not exist: $path"
-  decision=$(cat "$path")
-  [ -n "$decision" ] || fail "decision file must not be empty"
-  [ "$(printf '%s' "$decision" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
-    || fail "decision file exceeds 8192 bytes"
-  DECISION_TEXT=$decision
-  DECISION_DIGEST=$(sha256_text "$decision")
+  set_decision "$(cat "$path")" "decision file"
+}
+
+set_decision() {  # <text> <what>; sets DECISION_TEXT and DECISION_DIGEST
+  [ -n "$1" ] || fail "$2 must not be empty"
+  [ "$(printf '%s' "$1" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
+    || fail "$2 exceeds 8192 bytes"
+  DECISION_TEXT=$1
+  DECISION_DIGEST=$(sha256_text "$1")
 }
 
 # Mutations address the configured data directory's backlog from its root, the
@@ -517,11 +554,26 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
 # The record's label is what keeps an evidence-backed reconciliation from
 # reading as the captain's own words. `reconciled` closes a call that went moot
 # and carries verified evidence; every other mode carries what the captain said.
+# A versioned answer also names the request generation it answered and, when it
+# came from the captain's inbox, the answer note; an unversioned one does not.
+REQUEST_GENERATION=''
+ANSWER_NOTE=''
 resolution_block() {  # <mode>
-  local label='Captain decision:'
+  local label='Captain decision:' version=''
   [ "$1" != reconciled ] || label='Reconciliation evidence:'
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
+  [ -z "$REQUEST_GENERATION" ] || version="Request generation: $REQUEST_GENERATION"$'\n'
+  [ -z "$ANSWER_NOTE" ] || version="${version}Answer note: $ANSWER_NOTE"$'\n'
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n%s\n%s\n%s\n' \
+    "$DECISION_DIGEST" "$1" "$version" "$label" "$DECISION_TEXT"
+}
+
+# One header field of the NEWEST resolution record (records are prepended),
+# read from the decoded body; empty when that record does not carry it.
+newest_record_field() {  # <decoded-task-body> <field-label>
+  printf '%s\n' "$1" | awk -v label="$2: " '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ { if (seen) exit; seen = 1; next }
+    seen && $0 == "" { exit }
+    seen && index($0, label) == 1 { print substr($0, length(label) + 1); exit }'
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -1275,31 +1327,269 @@ remove_interrupted_answer_stamp() {  # <task-id>
   rm -f -- "$tmp"
 }
 
+# --- versioned answers: one reply bound to one request generation ------------
+#
+# The console path: the captain answers one request at one version through an
+# inbox answer note (bin/fm-inbox.sh note --answer-to), and firstmate applies it
+# with `answer --note-ref <note-id>`. The version check runs here, under the
+# task control lock `hold` also takes, against the generation the combined view
+# shows, read through the same backlog parser (bin/fm-fleet-snapshot.sh); the
+# result is recorded on the note (bin/fm-inbox.sh record-outcome).
+
+NOTE_REF=''
+NOTE_SOURCE=''
+NOTE_REQUEST=''
+NOTE_GENERATION=''
+REMAINING_REASON=''
+
+answer_inbox() {  # <fm-inbox.sh args...>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-inbox.sh" "$@"
+}
+
+# Read answer note <note-id>, which must answer captain-held task <task-id>.
+# Its body - only the captain's words - is the decision unless a decision file
+# is given.
+load_answer_note() {  # <note-id> <task-id> <decision-file-or-empty>
+  local note=$1 id=$2 record
+  case "$note" in
+    ''|*[!A-Za-z0-9._-]*|*..*) fail "--note-ref is not an inbox note id: $note" ;;
+  esac
+  command -v jq >/dev/null 2>&1 || fail "jq is required to read answer note $note"
+  record=$(answer_inbox show --json "$note" 2>/dev/null) || fail "no inbox note $note in this home"
+  NOTE_SOURCE=$(printf '%s' "$record" | jq -r '.answer_to.source // empty')
+  NOTE_REQUEST=$(printf '%s' "$record" | jq -r '.answer_to.request // empty')
+  NOTE_GENERATION=$(printf '%s' "$record" | jq -r '.answer_to.generation // empty')
+  [ -n "$NOTE_REQUEST" ] && [ -n "$NOTE_GENERATION" ] || fail "inbox note $note answers no request"
+  [ "$NOTE_SOURCE" = backlog ] && [ "$NOTE_REQUEST" = "$id" ] \
+    || fail "inbox note $note answers $NOTE_SOURCE:$NOTE_REQUEST, not captain-held task $id"
+  if [ -n "$3" ]; then
+    load_decision "$3"
+  else
+    set_decision "$(printf '%s' "$record" | jq -j '.body')" "the body of inbox note $note"
+  fi
+}
+
+load_remaining() {  # <path>; sets REMAINING_REASON
+  [ -f "$1" ] || fail "remaining-questions file does not exist: $1"
+  REMAINING_REASON=$(cat "$1")
+  case "$REMAINING_REASON" in
+    *[![:space:]]*) ;;
+    *) fail "the remaining questions must not be empty" ;;
+  esac
+  [ "$(printf '%s' "$REMAINING_REASON" | LC_ALL=C wc -c | tr -d ' ')" -le 8192 ] \
+    || fail "remaining-questions file exceeds 8192 bytes"
+}
+
+# The request generation the combined view shows for <task-id> now, read
+# through the same backlog parser; empty when that parser does not carry the
+# row as an open captain hold, and on a backlog backend other than markdown,
+# where any data/backlog.md left behind is not the live backlog.
+current_request_generation() {  # <task-id>
+  local out data root backend secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
+  command -v jq >/dev/null 2>&1 || return 1
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend "$root") || return 1
+  [ "$backend" = markdown ] || return 0
+  out=$(fm_run_timed "$secs" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r --arg id "$1" \
+    'first(.backlog.records[]? | select(.structured == true and .id == $id) | .hold_generation) // empty'
+}
+
+# Record <outcome> on the answer note this answer came from, if any. The
+# result itself is already durable, so a failed write names the retry, which is
+# idempotent, rather than reporting success.
+record_note_outcome() {  # <outcome> [<generation-after>]
+  local -a after_args=()
+  [ -n "$NOTE_REF" ] || return 0
+  [ -z "${2:-}" ] || after_args=(--generation-after "$2")
+  answer_inbox record-outcome "$NOTE_REF" --outcome "$1" --generation-seen "$NOTE_GENERATION" \
+    "${after_args[@]+"${after_args[@]}"}" >/dev/null && return 0
+  printf 'fm-captain-hold: the %s result is durable, but it was not recorded on inbox note %s; re-run this same command to record it\n' \
+    "$1" "$NOTE_REF" >&2
+  exit 1
+}
+
+# Refuse an answer whose request is no longer at the version it answered:
+# nothing about the call changes, and the note learns why.
+refuse_answer() {  # <outcome> <task-id> <generation-after-or-empty> <reason>
+  record_note_outcome "$1" "$3"
+  printf '%s: %s\n' "$1" "$2"
+  printf 'fm-captain-hold: %s\n' "$4" >&2
+  exit 4
+}
+
+# Rewrite an active captain hold's reason in place, keeping its hold-until date.
+set_captain_hold_reason() {  # <task-id> <reason> <shown-row>
+  local stored until
+  stored=$(fm_hold_reason_encode "$2") || return 1
+  until=$(show_field_value "$3" hold_until)
+  if [ -n "$until" ]; then
+    tasks_axi hold "$1" --reason "$stored" --kind captain --until "$until" >/dev/null
+  else
+    tasks_axi hold "$1" --reason "$stored" --kind captain >/dev/null
+  fi
+}
+
+publish_answer_outcome() {  # <task-id> <occurrence> <outcome>
+  if [ "$3" = partial ]; then
+    # The answered occurrence resolves; the remaining questions open the next.
+    publish_parent_hold "$1" "$2" resolved partial
+    publish_parent_hold "$1" $(( $2 + 1 )) needs-decision "$REMAINING_REASON"
+  else
+    publish_parent_resolution_then_retire "$1" "$2" "$3"
+  fi
+}
+
+# Finish an answer whose resolution record is durable: close or release the
+# call, or keep a partially answered call held on its remaining questions. The
+# caller publishes the outcome once the result is verified.
+finish_answer() {  # <task-id> <outcome> <shown-row>
+  case "$2" in
+    partial)
+      set_captain_hold_reason "$1" "$REMAINING_REASON" "$3" \
+        || fail "could not keep $1 held on its remaining questions"
+      ;;
+    released)
+      close_answered "$1" 1 || fail "could not close answered captain-held task $1"
+      remove_interrupted_answer_stamp "$1"
+      ;;
+    *)
+      close_answered "$1" 0 || fail "could not close answered captain-held task $1"
+      remove_interrupted_answer_stamp "$1"
+      ;;
+  esac
+}
+
+record_and_finish_answer() {  # <task-id> <outcome> <occurrence> <shown-body> <shown-row>
+  write_resolution_record "$1" "$2" "$4"
+  finish_answer "$1" "$2" "$5"
+  task_show "$1" || fail "task $1 disappeared after recording its answer"
+  body_has_resolution_record "$(show_field "$TASK_SHOW_OUTPUT" body)" \
+    || fail "captain-held task $1 did not retain its durable resolution record"
+  [ "$2" != partial ] || [ "$(show_field_value "$TASK_SHOW_OUTPUT" hold_kind)" = captain ] \
+    || fail "task $1 did not stay held for the captain after its partial answer"
+  publish_answer_outcome "$1" "$3" "$2"
+}
+
+# "<position> <mode>" of the newest resolution record (1 = newest) carrying
+# <digest>, <generation>, and <note>; empty when none does.
+matching_record() {  # <decoded-task-body> <digest> <generation> <note>
+  printf '%s\n' "$1" | awk -v d="$2" -v g="$3" -v n="$4" '
+    function check() { if (inrec && dg == d && gn == g && nt == n) { print idx " " md; found = 1; exit } }
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ {
+      check(); idx++; inrec = 1; hdr = 1; dg = ""; md = ""; gn = ""; nt = ""; next }
+    hdr && $0 == "" { hdr = 0; check(); inrec = 0; next }
+    hdr && index($0, "Decision digest: ") == 1 { dg = substr($0, 18) }
+    hdr && index($0, "Resolution mode: ") == 1 { md = substr($0, 18) }
+    hdr && index($0, "Request generation: ") == 1 { gn = substr($0, 21) }
+    hdr && index($0, "Answer note: ") == 1 { nt = substr($0, 14) }
+    END { if (!found) check() }'
+}
+
+# Apply a versioned answer only while the request is still at <expect>. An
+# exact retry - same words, version, and note - of an answer already recorded
+# finishes it instead, so a crash before the close or before the outcome
+# recovers with one resolution; it never touches a call held again since.
+answer_at_version() {  # <task-id> <expect> <outcome> <occurrence> <shown-row>
+  local id=$1 expect=$2 outcome=$3 occurrence=$4 show=$5 state hold_kind body decoded match pos mode current after=''
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  decoded=$(decode_shown_value "$body") || fail "could not decode the body of $id"
+  match=$(matching_record "$decoded" "$DECISION_DIGEST" "$expect" "$NOTE_REF")
+  if [ -n "$match" ]; then
+    pos=${match%% *}
+    mode=${match#* }
+    [ "$mode" = "$outcome" ] \
+      || fail "task $id already records this answer as $mode; retry it with the same mode"
+    if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
+      if [ "$pos" = 1 ] && [ "$(body_hold_set_timestamp "$decoded")" = "${expect%%#*}" ]; then
+        finish_answer "$id" "$outcome" "$show"
+        publish_answer_outcome "$id" $((occurrence - 1)) "$outcome"
+      fi
+    elif [ "$pos" = 1 ] && [ "$mode" != partial ]; then
+      remove_interrupted_answer_stamp "$id"
+      publish_answer_outcome "$id" $((occurrence - 1)) "$mode"
+    fi
+  else
+    [ "$state" != "done" ] || refuse_answer already-closed "$id" '' "captain-held task $id is already closed; nothing was changed"
+    [ "$hold_kind" = captain ] \
+      || refuse_answer already-closed "$id" '' "task $id is no longer held for the captain; nothing was changed"
+    current=$(current_request_generation "$id") \
+      || fail "could not read this home's backlog to check the version of $id; nothing was changed"
+    [ -n "$current" ] \
+      || fail "this home's backlog view gives $id no request generation, so its version cannot be checked; nothing was changed"
+    [ "$current" = "$expect" ] \
+      || refuse_answer stale-generation "$id" "$current" "captain-held task $id changed since this answer was written (answered $expect, now $current); nothing was changed"
+    record_and_finish_answer "$id" "$outcome" "$occurrence" "$body" "$show"
+  fi
+  [ "$outcome" != partial ] || after=$(current_request_generation "$id" || true)
+  record_note_outcome "$outcome" "$after"
+  printf '%s: %s\n' "$outcome" "$id"
+}
+
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
+  local id=${1:-} decision_file='' release=0 remaining_file='' expect='' show state hold_kind body outcome recorded_mode occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --decision-file) shift; decision_file=${1:-} ;;
       --release) release=1 ;;
+      --remaining-file) shift; remaining_file=${1:-}; [ -n "$remaining_file" ] || { usage >&2; exit 2; } ;;
+      --expect) shift; expect=${1:-}; [ -n "$expect" ] || { usage >&2; exit 2; } ;;
+      --note-ref) shift; NOTE_REF=${1:-}; [ -n "$NOTE_REF" ] || { usage >&2; exit 2; } ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
   done
   validate_slug task-id "$id"
-  load_decision "$decision_file"
+  if [ "$release" = 1 ] && [ -n "$remaining_file" ]; then
+    fail "--release frees held work while --remaining-file keeps the call held; pass one of them"
+  fi
+  [ -z "$remaining_file" ] || load_remaining "$remaining_file"
+  if [ -n "$NOTE_REF" ]; then
+    load_answer_note "$NOTE_REF" "$id" "$decision_file"
+    [ -z "$expect" ] || [ "$expect" = "$NOTE_GENERATION" ] \
+      || fail "--expect $expect is not the version inbox note $NOTE_REF answers ($NOTE_GENERATION)"
+    expect=$NOTE_GENERATION
+  else
+    load_decision "$decision_file"
+  fi
+  REQUEST_GENERATION=$expect
+  ANSWER_NOTE=$NOTE_REF
   acquire_task_control_lock "$id"
   require_tasks_axi
-  task_show "$id" || fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  if ! task_show "$id"; then
+    [ -z "$expect" ] \
+      || refuse_answer not-found "$id" '' "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+    fail "captain-held task $id is absent from this home's configured backlog (data directory $DATA)"
+  fi
   show=$TASK_SHOW_OUTPUT
   state=$(show_field "$show" state)
   hold_kind=$(show_field_value "$show" hold_kind)
   body=$(show_field "$show" body)
-  if [ "$release" = 1 ]; then outcome=released; else outcome=answered; fi
+  if [ "$release" = 1 ]; then
+    outcome=released
+  elif [ -n "$remaining_file" ]; then
+    outcome=partial
+  else
+    outcome=answered
+  fi
   # The occurrence the parent line names: the record about to be written is
   # one past those already in the body, and a retry names the newest one.
   occurrence=$(( $(resolution_record_count "$body") + 1 ))
+
+  if [ -n "$expect" ]; then
+    answer_at_version "$id" "$expect" "$outcome" "$occurrence" "$show"
+    return 0
+  fi
+  if [ "$outcome" = partial ] && { [ "$state" = "done" ] || [ "$hold_kind" != captain ]; }; then
+    fail "a partial answer keeps the call held, but task $id is not held for the captain"
+  fi
 
   if [ "$state" = "done" ]; then
     if body_has_resolution_record "$body"; then
@@ -1342,35 +1632,30 @@ command_answer() {
     # Actively the captain's item (a date-expired hold keeps its annotations
     # and stays answerable). A matching record means an interrupted close to
     # finish; a different digest is a NEW answer on a re-held task and gets
-    # its own record on top. Either way the close mode is the caller's flag,
-    # checked against an interrupted close's recorded mode so a retry cannot
-    # silently flip a release into a close.
+    # its own record on top, and so does a close of a call whose matching
+    # record was a partial answer that kept it held. The close mode is the
+    # caller's flag, checked against an interrupted close's recorded mode so a
+    # retry cannot silently flip a release into a close.
     if body_has_resolution_record "$body" \
       && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
-      case "$recorded_mode" in
-        released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
-        answered|routed) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
-        *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
-      esac
-      if ! close_answered "$id" "$release"; then
-        fail "could not close answered captain-held task $id"
+      if [ "$recorded_mode" != partial ] || [ "$outcome" = partial ]; then
+        case "$recorded_mode" in
+          released) [ "$outcome" = released ] || fail "task $id records this answer as a release; retry with --release" ;;
+          answered|routed)
+            [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release"
+            [ "$outcome" = answered ] || fail "task $id records this answer as a close; retry without --remaining-file"
+            ;;
+          partial) : ;;
+          *) fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a captain-answer replay" ;;
+        esac
+        finish_answer "$id" "$outcome" "$show"
+        publish_answer_outcome "$id" $((occurrence - 1)) "$outcome"
+        printf '%s: %s\n' "$outcome" "$id"
+        return 0
       fi
-      remove_interrupted_answer_stamp "$id"
-      publish_parent_resolution_then_retire "$id" $((occurrence - 1)) "$outcome"
-      printf '%s: %s\n' "$outcome" "$id"
-      return 0
     fi
-    write_resolution_record "$id" "$outcome" "$body"
-    if ! close_answered "$id" "$release"; then
-      fail "could not close answered captain-held task $id"
-    fi
-    remove_interrupted_answer_stamp "$id"
-    task_show "$id" || fail "task $id disappeared after closing"
-    show=$TASK_SHOW_OUTPUT
-    body_has_resolution_record "$(show_field "$show" body)" \
-      || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_resolution_then_retire "$id" "$occurrence" "$outcome"
+    record_and_finish_answer "$id" "$outcome" "$occurrence" "$body" "$show"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi
