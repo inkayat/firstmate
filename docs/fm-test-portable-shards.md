@@ -116,7 +116,7 @@ Its hint-coverage and modeled-budget checks are described in [Portable serial CI
 
 ## Timing artifacts
 
-Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
+Portable shards, each portable serial shard, the Herdr lane, and the herdr-core lane upload runner-generated timing JSON.
 `bin/fm-test-run.sh --aggregate-json` creates the combined summary artifact.
 `.github/workflows/ci.yml` owns the exact artifact names and aggregation wiring.
 
@@ -130,7 +130,7 @@ No fast mode, path skips, or paid runner provisioning is part of this layout.
 
 The longer-term performance objective remains a complete green run under fifteen minutes including start delay, but the three watch-triage members still sum to about 26 minutes of CI test time.
 The immediate packing target is the runner's modeled script budget, not a claim that more shards alone can make an indivisible script faster.
-The layout uses fifteen long-lived Linux jobs (ten serial, two parallel, Herdr, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
+The layout uses sixteen long-lived Linux jobs (ten serial, two parallel, Herdr, herdr-core, two lint), plus short checks and macOS; insufficient shared account capacity can erase the packing gain.
 Compare complete before/after runs, preserve cancelled and partial-run evidence, and measure a representative normal-run sample before claiming a P95 improvement.
 The workflow retains per-PR supersession and keeps only the newest of close pushes' runs on each pushed branch, without changing the compliance workflow's event semantics.
 

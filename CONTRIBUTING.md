@@ -53,7 +53,7 @@ Add required status checks with `strict_required_status_checks_policy: false`; a
 Bind the checks to the GitHub Actions app already producing them, rather than accepting the same context from any integration.
 No new app installation or manual runner setup is needed for that setting.
 
-Require the actual job contexts: `Full suite`, `Lint 1`, `Lint 2`, `Test coverage guard`, `Repo invariants`, `Stock macOS Bash snapshot compatibility`, `Behavior portable parallel 1`, `Behavior portable parallel 2`, `Behavior portable serial 1` through `Behavior portable serial 10`, `Behavior tests (Herdr)`, `Behavior timing aggregate`, and `PR must be raised via no-mistakes`.
+Require the actual job contexts: `Full suite`, `Lint 1`, `Lint 2`, `Test coverage guard`, `Repo invariants`, `Stock macOS Bash snapshot compatibility`, `Behavior portable parallel 1`, `Behavior portable parallel 2`, `Behavior portable serial 1` through `Behavior portable serial 10`, `Behavior tests (Herdr)`, `Behavior tests (herdr-core)`, `Behavior timing aggregate`, and `PR must be raised via no-mistakes`.
 The last name is the compliance job context, not its workflow title; its existing automation exceptions remain unchanged.
 The timing aggregate is not a substitute for individual jobs because it can succeed while collecting evidence from a failed run.
 The individual lanes skip on an outside pull request until it has the `full-ci` label, and a skipped job satisfies a required check, so `Full suite` must be required too: it fails until the label is on and whenever a lane failed or was cancelled.
@@ -141,7 +141,7 @@ Its header and `--help` own the flags, family labels, lanes, and changed-file ma
 `bin/fm-test-isolation-proof.sh` remains the single owner of the portable candidate proof and reusable family proof harness; see `docs/fm-test-isolation-proof.md`.
 Portable shard balance evidence lives in `docs/fm-test-portable-shards.md`.
 Family selection is the ordinary local path; `--all` is deliberate full regression only.
-CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), for pushes to and PRs into `main` or this fork's integration branch `inkayat-main`.
+CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr and herdr-core (`hc`) lanes, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), for pushes to and PRs into `main` or this fork's integration branch `inkayat-main`.
 Pushing a new head to a pull request cancels that pull request's still-running CI so only the current head is validated, and a newer push to `main` or `inkayat-main` cancels that branch's older run so only its newest merge's run finishes; the workflow owns that contract, the `full-ci` gate described under [The `full-ci` label](#the-full-ci-label), and their rationale.
 A fork can set the repository variable `FM_CI_SKIP_PUSH` to `1` to skip the push run of `CI`, and `FM_CI_SKIP_MACOS` to `1` to skip the stock macOS Bash job, without a tracked edit that drifts from upstream.
 Each skip is a job-level condition, so a skipped job reports success rather than leaving the pull request pending, and with neither variable set every job runs on upstream and on every fork exactly as before.
