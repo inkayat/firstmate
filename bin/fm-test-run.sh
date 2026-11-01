@@ -312,7 +312,7 @@ family_for_basename() {
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|fm-agy-primary.test.sh|\
     fm-parent-channel-scan-exclusion.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-drain-unread-status.test.sh|\
+    fm-wake-drain-inbox-notes.test.sh|fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-mail.test.sh|fm-mail-check.test.sh|\
     fm-turnend-foreign-owner-arm-fix.test.sh|\
@@ -779,6 +779,7 @@ tests/fm-commandcode-signals-live-e2e.test.sh 49
 tests/fm-composer-codex-idle-live-e2e.test.sh 77
 tests/fm-composer-matrix-live-e2e.test.sh 51
 tests/fm-console-signals.test.sh 8986
+tests/fm-console-submit.test.sh 5036
 tests/fm-contributions.test.sh 140911
 tests/fm-control-relaunch.test.sh 114115
 tests/fm-control.test.sh 72794
@@ -940,6 +941,7 @@ tests/fm-update.test.sh 11894
 tests/fm-vendor-auth-probe.test.sh 43278
 tests/fm-voice-relay.test.sh 28917
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7345
+tests/fm-wake-drain-inbox-notes.test.sh 6000
 tests/fm-wake-drain-open-decisions-cursor.test.sh 47677
 tests/fm-wake-drain-open-decisions.test.sh 8781
 tests/fm-wake-drain-outcome-backstop.test.sh 46316
@@ -1666,6 +1668,7 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-supervision-host-hook.test.sh
       printf '%s\n' __script__:fm-supervision-host-park.test.sh
       printf '%s\n' __script__:fm-pi-console-bridge.test.sh
+      printf '%s\n' __script__:fm-console-submit.test.sh
       # Whether an arriving outcome still lets the captain type is a fact only
       # a real Pi TUI can answer, so the live guards are selected too.
       printf '%s\n' live-harness-optin
@@ -1695,6 +1698,12 @@ families_for_changed_path() {
       # The omp feed of the console journal: the journal suite, whose omp cases
       # load it, and the Pi typecheck, which includes it.
       printf '%s\n' __script__:fm-pi-console-bridge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      ;;
+    .omp/extensions/fm-console-submit.ts)
+      # The console submit channel: its suite, whose omp cases load this
+      # extension, and the Pi typecheck, which includes it.
+      printf '%s\n' __script__:fm-console-submit.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       ;;
     .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\

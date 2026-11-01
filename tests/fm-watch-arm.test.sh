@@ -1126,6 +1126,10 @@ test_inbox_note_reaches_main_during_branch_handled_closes() {
         if [ -n "$key" ] && grep -F "$key" "$dir/main-$i.out" >/dev/null; then
           presented=$((presented + 1))
           case "$reason" in *"$key"*) named=1 ;; esac
+          # Main handles the presented note before acknowledging its wake,
+          # which the drain refuses while the note is still pending.
+          FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-inbox.sh" drain --ack "${key#inbox:}" >/dev/null \
+            || fail "main could not mark the presented note handled at step $i"
         fi
         if pair=$(drain_ack_pair "$dir/main-$i.err"); then
           FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "${pair%%$'\t'*}" --recovery-generation "${pair#*$'\t'}" \

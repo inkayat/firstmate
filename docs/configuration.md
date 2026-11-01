@@ -110,7 +110,9 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
+- Captain inbox notes under `state/inbox/`, with their handled copies, replies, and the log of wake acknowledgements that named a still-pending note, `state/inbox/.ack-overrides.log` (`bin/fm-inbox.sh`, `bin/fm-wake-drain.sh`).
 - The opt-in console-signals file `state/console-signals.json`, its last complete captain-pending view `state/.console-signals-pending.json`, and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
+- The opt-in console submit channel `state/console-submit/`: queued and in-flight console messages, their receipts, and the delivering omp process's `consumer.json` ([console-submit.md](console-submit.md)).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -859,6 +861,13 @@ When that view's fleet snapshot is unavailable, only open ledger entries are pub
 A complete view is reused for up to 60 seconds while the files it reads are unchanged, which keeps an idle fleet from running it every poll.
 The file is written only while the home's session lock is held, carries that lock's pid, and is removed when the lock is free or stale.
 Publishing adds no model call, no network access, and no long-lived process: each run is one short local process the watcher never waits for, and a slow or failing run only leaves the previous file to age and its reasons in `state/.console-signals.log`.
+
+## Console submit (config/console-submit)
+
+The optional local, gitignored `config/console-submit` presence flag opts this home, on this machine, into the console submit channel: a same-user console such as Astro's FirstMate page runs `bin/fm-console-submit.sh enqueue` to put the captain's own message into the omp primary's conversation as an ordinary user turn, and the answer streams back through the console journal.
+[console-submit.md](console-submit.md) owns the contract, including delivery, receipts, bounds, and trust, and [`bin/fm-console-submit.sh`](../bin/fm-console-submit.sh)'s header owns the command line.
+Create the flag with `touch "$FM_HOME/config/console-submit"`, then let the running omp primary load `.omp/extensions/fm-console-submit.ts` with `/reload`; remove the flag to stop it within half a second.
+The flag is a home-local choice and is not inherited by secondmate homes, and only an omp primary delivers.
 
 ## PR-ready line after green (config/ready-after-green)
 
