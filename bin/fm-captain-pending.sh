@@ -240,7 +240,7 @@ append_event() {  # <json-line>
 }
 
 cmd_add() {
-  local kind='' task='' key='' due='' text='' fold existing seq id event
+  local kind='' task='' key='' due='' text='' fold existing seq id event kind_ok known_kind
   while [ $# -gt 0 ]; do
     case "$1" in
       --kind) [ $# -ge 2 ] || usage_fail "--kind needs a value"; kind=$2; shift 2 ;;
@@ -258,10 +258,11 @@ cmd_add() {
   else
     text="$*"
   fi
-  case " $KINDS " in
-    *" $kind "*) [ -n "$kind" ] || usage_fail "--kind is required ($KINDS)" ;;
-    *) usage_fail "--kind must be one of: $KINDS" ;;
-  esac
+  kind_ok=0
+  for known_kind in $KINDS; do
+    [ "$kind" = "$known_kind" ] && kind_ok=1
+  done
+  [ "$kind_ok" = 1 ] || usage_fail "--kind must be one of: $KINDS"
   [ -z "$task" ] || valid_ident "$task" || usage_fail "--task is not a valid task id: $task"
   [ -z "$key" ] || valid_ident "$key" || usage_fail "--key is not a valid key: $key"
   [ -z "$due" ] || valid_date "$due" || usage_fail "--due must be YYYY-MM-DD: $due"
