@@ -50,6 +50,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
+#                       the open captain-pending ledger entries
+#                       (bin/fm-captain-pending.sh list --ledger-only),
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read, each bounded and crash-
@@ -975,6 +977,12 @@ for status in "$STATE"/*.status; do
   print_status_tail "$status"
 done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
+
+# Open captain-pending ledger entries only: a local read with no fleet snapshot.
+# The full combined view is `bin/fm-captain-pending.sh list`.
+subsection "Captain-pending ledger (data/captain-pending.jsonl, open entries)"
+"$SCRIPT_DIR/fm-captain-pending.sh" list --ledger-only 2>&1 \
+  || printf '(ledger unreadable - run bin/fm-captain-pending.sh list --ledger-only)\n'
 
 subsection "AFK"
 # The away posture is the record (bin/fm-afk-contract.sh); the legacy flag

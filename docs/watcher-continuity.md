@@ -342,6 +342,10 @@ If a branch offer loses the claim race to main, it rejects its settlement so the
 While attended, a check-kind row is main-owned, including a heartbeat review.
 So it is never part of a branch claim and never defers one.
 Main is woken for it on that check's own triggering close.
+A captain inbox note's row is appended outside the watcher, and while attended the branch-handled closes after it never claim it, so during a stream of them the downtime recovery waits on a handling episode nothing settles.
+`bin/fm-watch.sh` therefore surfaces a queued `inbox:*` row once, as `check: captain inbox note queued: <keys>`, when a row queued after it has been consumed while it stayed unpresented and unreported.
+That step runs after the downtime recovery and ahead of the stale scan, and a recovery close marks the queued notes it hands over as reported.
+An acknowledged row is no longer queued, so the watcher cannot surface it; `bin/fm-wake-drain.sh` instead refuses to acknowledge a still-pending note's row unless the acknowledgement names the note, and lists any pending note whose row is gone at every main drain until the note is handled.
 Under the away-posture record the exclusion lifts and a check row is offered to and claimed by the branch like every other actionable row.
 
 `fm-wake-drain.sh` never reclassifies a row itself.

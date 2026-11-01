@@ -312,7 +312,7 @@ family_for_basename() {
     fm-session-lock-ancestry.test.sh|fm-cursor-primary.test.sh|fm-agy-primary.test.sh|\
     fm-parent-channel-scan-exclusion.test.sh|\
     fm-supervision-events.test.sh|fm-turnend-guard.test.sh|fm-wake-daemon-lifecycle-e2e.test.sh|\
-    fm-wake-drain-unread-status.test.sh|\
+    fm-wake-drain-inbox-notes.test.sh|fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-mail.test.sh|fm-mail-check.test.sh|\
     fm-turnend-foreign-owner-arm-fix.test.sh|\
@@ -385,7 +385,7 @@ family_for_basename() {
     fm-send-inbox-doorbell-live-e2e.test.sh|\
     fm-secondmate-busy-contract-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
-    fm-calm-pi-queue-retention-live-e2e.test.sh|\
+    fm-calm-pi-queue-retention-live-e2e.test.sh|fm-pi-console-bridge-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh|\
     fm-backend-rex-composer-live-e2e.test.sh|\
     fm-watch-wedge-cap-live.test.sh|fm-read-repetition-live.test.sh)
@@ -397,7 +397,7 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
-    fm-worker-account.test.sh|\
+    fm-worker-account.test.sh|fm-worker-preparation.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
@@ -763,6 +763,7 @@ tests/fm-calm-claude-mod-plugin.test.sh 77
 tests/fm-calm-claude-mod.test.sh 2527
 tests/fm-calm-pi-extension.test.sh 56463
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
+tests/fm-captain-pending.test.sh 2258
 tests/fm-check-unregister.test.sh 469
 tests/fm-ci-workflow.test.sh 5833
 tests/fm-classify-corr-token.test.sh 23085
@@ -777,6 +778,8 @@ tests/fm-commandcode-harness.test.sh 8182
 tests/fm-commandcode-signals-live-e2e.test.sh 49
 tests/fm-composer-codex-idle-live-e2e.test.sh 77
 tests/fm-composer-matrix-live-e2e.test.sh 51
+tests/fm-console-signals.test.sh 8986
+tests/fm-console-submit.test.sh 5036
 tests/fm-contributions.test.sh 140911
 tests/fm-control-relaunch.test.sh 114115
 tests/fm-control.test.sh 72794
@@ -938,6 +941,7 @@ tests/fm-update.test.sh 11894
 tests/fm-vendor-auth-probe.test.sh 43278
 tests/fm-voice-relay.test.sh 28917
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7345
+tests/fm-wake-drain-inbox-notes.test.sh 6000
 tests/fm-wake-drain-open-decisions-cursor.test.sh 47677
 tests/fm-wake-drain-open-decisions.test.sh 8781
 tests/fm-wake-drain-outcome-backstop.test.sh 46316
@@ -1663,6 +1667,8 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-supervision-host-drain.test.sh
       printf '%s\n' __script__:fm-supervision-host-hook.test.sh
       printf '%s\n' __script__:fm-supervision-host-park.test.sh
+      printf '%s\n' __script__:fm-pi-console-bridge.test.sh
+      printf '%s\n' __script__:fm-console-submit.test.sh
       # Whether an arriving outcome still lets the captain type is a fact only
       # a real Pi TUI can answer, so the live guards are selected too.
       printf '%s\n' live-harness-optin
@@ -1678,7 +1684,27 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-turnend-guard.test.sh
       printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' __script__:fm-pi-console-bridge.test.sh
       printf '%s\n' live-harness-optin
+      ;;
+    .pi/extensions/fm-console-bridge.ts)
+      # The console journal's own suite, the Pi typecheck, and its live guard,
+      # which proves the vendor event payloads it reads.
+      printf '%s\n' __script__:fm-pi-console-bridge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    .omp/extensions/fm-console-bridge.ts)
+      # The omp feed of the console journal: the journal suite, whose omp cases
+      # load it, and the Pi typecheck, which includes it.
+      printf '%s\n' __script__:fm-pi-console-bridge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      ;;
+    .omp/extensions/fm-console-submit.ts)
+      # The console submit channel: its suite, whose omp cases load this
+      # extension, and the Pi typecheck, which includes it.
+      printf '%s\n' __script__:fm-console-submit.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
       ;;
     .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\
     .pi/extensions/lib/fm-calm-working-ship-sprite.ts)
@@ -1755,6 +1781,9 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' pure-contract-unit
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-worker-preparation.mjs)
+      printf '%s\n' backend-dispatch
       ;;
     bin/fm-spawn.sh|bin/fm-send.sh|bin/fm-harness.sh|\
     bin/fm-peek.sh|bin/fm-composer*)

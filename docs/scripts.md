@@ -32,6 +32,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | [`fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) | Move queued backlog items into a secondmate home; its header owns route-specific wake outcomes and retries |
 | `fm-backlog-receive.sh`  | Idempotently ingest one confined remote handoff outbox through tasks-axi             |
 | `fm-captain-hold.sh`     | Hold tasks for the captain, record the captain's answers, gate investigation completion, and report record divergence between the status log and the backlog |
+| `fm-captain-pending.sh`  | Record asks waiting on the captain that have no task of their own, and list everything waiting on the captain in one combined view |
 | `fm-decision-hold.sh`    | One-release compatibility shim mapping the retired decision commands onto fm-captain-hold.sh |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`, plus the project's registered `--forge` and `--pr`), scout, secondmate-charter, and Herdr-lab briefs, with Captain's intent and Firstmate spec subsections on ship/scout |
 | [`fm-dod-lib.sh`](../bin/fm-dod-lib.sh) | Own ship/scout worker role scope, ship definitions of done, the named-head reachability gate on ship `done:` acceptance, and the no-mistakes `--intent` contract |
@@ -48,6 +49,10 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-test-isolation-proof.sh` | Concurrent isolation harness and portable candidate set owner |
 | `fm-ensure-agents-md.sh` | Manually initialize project agent-memory files (see the helper's header and help) |
 | `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json` |
+| `fm-console-signals.sh`  | Opt-in: publish this home's `fm-console-signals.v1` file (waiting state and questions from the captain-pending combined view, bots) for an external console; the watcher runs `write` each poll while `config/console-signals` exists |
+| `fm-console-signals.py`  | The assembly and atomic-write engine behind `fm-console-signals.sh` |
+| `fm-console-submit.sh`   | Opt-in: queue the captain's own message from a same-user console (`enqueue`, text on stdin) for the omp primary's conversation and read its receipt (`status`); `config/console-submit` enables it and [console-submit.md](console-submit.md) owns the contract |
+| `fm-console-submit.py`   | The validation, queue, and receipt engine behind `fm-console-submit.sh` |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |
 | `fm-session-lock-lib.sh` | Shared session-lock ownership from harness ancestry, a trusted Claude session id, or on Windows/Git Bash a published harness pid, for fm-lock.sh and the Claude Stop auto-arm, plus the read-only lock inspection behind `fm-lock.sh status` and `fm-inbox.sh ready` |
@@ -127,7 +132,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-credential-source-lib.sh` | Single owner of the declared credential-source schema and its adapters, read by `fm-dispatch-resolve.sh` and checked by `fm-bootstrap.sh` |
 | `fm-quota-choose.sh`     | Choose the first candidate with known positive quota from an ordered harness:model list |
 | `fm-vendor-auth-probe.sh`| Run one hard-bounded, non-destructive authentication probe of a named vendor CLI and report the fact |
-| `fm-wake-drain.sh`       | Present and acknowledge the current actor's claimed wake rows alongside status, outcome-backstop, decision, divergence, supervision-host outcome, recovery, and supervision checks |
+| `fm-wake-drain.sh`       | Present and acknowledge the current actor's claimed wake rows alongside pending captain notes and status, outcome-backstop, decision, divergence, supervision-host outcome, recovery, and supervision checks, refusing to acknowledge a still-pending captain note's wake |
 | `fm-wake-grant.sh`       | Serialize Pi supervision-branch wake-row claim activation, publication, release, and deactivation |
 | `fm-wake-lib.sh`         | Shared durable wake queue, recovery generations, portable locks, and watcher identity/health helpers |
 | `fm-path-lib.sh`         | Fork-free `dirname`/`basename` equivalents with no source-time side effects             |
