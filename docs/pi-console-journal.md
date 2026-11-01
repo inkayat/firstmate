@@ -1,7 +1,7 @@
 # Pi console journal
 
 `.pi/extensions/fm-console-bridge.ts` publishes a read-only, bounded projection of the lock-owning Pi or omp primary's main conversation for a same-user reader such as a console UI.
-It is not a way to send anything to Firstmate: input keeps going through `bin/fm-inbox.sh`, and the journal's own metadata says so.
+It is not a way to send anything to Firstmate: input goes through `bin/fm-inbox.sh` or, on an omp primary that opted in, the separate [console submit channel](console-submit.md), and the journal's own metadata says so.
 This page owns the published contract (`fm-console-journal.v1`); the extension's header comment owns how the extension keeps it.
 
 ## Scope
