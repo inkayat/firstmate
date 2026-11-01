@@ -5,8 +5,8 @@
 # Usage:
 #   fm-captain-pending.sh add --kind <kind> [--task <task-id>] [--key <key>] \
 #     [--due YYYY-MM-DD] [--] <text>...      (or `-` as the text: read stdin)
-#   fm-captain-pending.sh answer <id> [--note <text>]
-#   fm-captain-pending.sh drop <id> [--note <text>]
+#   fm-captain-pending.sh answer <id> [--note <text>] [--note-ref <note-id>]
+#   fm-captain-pending.sh drop <id> [--note <text>] [--note-ref <note-id>]
 #   fm-captain-pending.sh show [--json] <id>
 #   fm-captain-pending.sh list [--json] [--ledger-only]
 #
@@ -28,6 +28,14 @@
 # `answer` closes an open entry with the captain's answer as the note; `drop`
 # closes one that no longer needs the captain (withdrawn, moot, superseded).
 # Both refuse an unknown id or an entry that is already closed (exit 1).
+# --note-ref closes the entry with a console answer note (bin/fm-inbox.sh note
+# --answer-to ledger:<id>@<id>; an entry's text never changes, so its id is its
+# generation): its body, only the captain's words, is the note unless --note is
+# given, the close event records the note id, and the outcome (answered or
+# dropped) is recorded on the note. With --note-ref, an entry already closed by
+# that same note is an idempotent retry, while an entry closed otherwise or
+# unknown is refused with exit 4 and an already-closed or not-found outcome on
+# the note.
 # `show` prints one entry, open or closed, with its closing note.
 #
 # Writes take a lock beside the ledger (bin/fm-wake-lib.sh lock primitives,
@@ -74,16 +82,42 @@
 # session-start digest uses it.
 # `list --json` prints schema `fm-captain-pending-list.v1`: generated, fm_home,
 # ledger {path,present,unreadable_lines}, fleet {available,reason},
-# counts {live,waiting_on_captain,paused_by_captain_order,paused_other_reason},
-# and one array per section. Each item carries id, source, kind, key, task_id,
-# age_seconds, age (rendered; whole days when only a hold date is known),
-# task_state, label, live, text, due, and created (a ledger entry's add time;
-# a hold's recorded hold-set time, else its since date; null for a status
-# decision).
+# coverage {complete,missing[]},
+# counts {live,waiting_on_captain,paused_by_captain_order,paused_other_reason,
+# needs_recheck,deferred,blocked,parked,other,stale,total}, and one array per
+# section. Each item carries id, source, kind, key, task_id, age_seconds, age
+# (rendered; whole days when only a hold date is known), task_state, label,
+# live, text (never cut), due, created (a ledger entry's add time; a hold's
+# recorded hold-set time, else its since date; null for a status decision),
+# bucket, generation, and reply.
+# bucket is the item's one exact state and the counts tally it: live (counted
+# by counts.live), needs_recheck (a captain hold aged or past its deferral
+# date: still unanswered, never dropped), deferred (a captain hold with a
+# future date), blocked (a blocked captain hold or blocked status decision),
+# parked, other (any other hold kind), or stale (a shadowed status decision).
+# generation is the version a reply binds to: a captain hold's request
+# generation (bin/fm-hold-reason-lib.sh owns the rule), a ledger entry's own id,
+# and null for anything else, including status decisions, which have no
+# opening-event identity. reply is {via:"inbox-note", answer_to} for an item
+# with a generation and null otherwise; a console renders the item's whole text
+# from this same document and sends the captain's words with that exact
+# answer_to (bin/fm-inbox.sh note --answer-to).
+# coverage names, as {source, reason}, every source this view did not read in
+# full, and complete is true only when there is none; the counts then cover
+# only what was read, so they are a lower bound and never a complete zero.
+# Sources: backlog and status when the snapshot was unavailable; backlog when
+# this home keeps its backlog in a backend other than the markdown file the
+# snapshot parses (its captain holds are unknown, and no row from a leftover
+# markdown file is listed); secondmates when the secondmate registry was not
+# read in full or registered secondmates lay beyond the snapshot bound; and
+# secondmate:<id> when a secondmate's summary was unavailable or cut its
+# captain calls. The human view prints one INCOMPLETE line per source.
 #
-# Exit codes: 0 success; 1 refused or failed; 2 usage. `list` exits 3 when the
-# snapshot was unavailable: the ledger section is still printed, the output
-# names the missing sources, and the result must not be read as complete.
+# Exit codes: 0 success; 1 refused or failed; 2 usage; 4 a --note-ref close
+# refused because the entry is not open (its outcome is on the note). `list`
+# exits 3 when the snapshot was unavailable: the ledger section is still
+# printed, the output names the missing sources, and the result must not be
+# read as complete.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -165,12 +199,13 @@ ledger_fold() {
           .order += [$e.id]
           | .by[$e.id] = {id:$e.id, seq:$e.seq, kind:$e.kind, text:$e.text,
               task:$e.task, key:$e.key, due:$e.due, created:$e.at,
-              created_epoch:$e.epoch, status:"open", note:null,
+              created_epoch:$e.epoch, status:"open", note:null, note_ref:null,
               closed:null, closed_epoch:null}
         elif ($e.event == "answer" or $e.event == "drop")
              and .by[$e.id] != null and .by[$e.id].status == "open" then
           .by[$e.id] += {status:(if $e.event == "answer" then "answered" else "dropped" end),
-                         note:$e.note, closed:$e.at, closed_epoch:$e.epoch}
+                         note:$e.note, note_ref:($e.note_ref // null),
+                         closed:$e.at, closed_epoch:$e.epoch}
         else . end)
     | {present:true, unreadable:$bad, entries:[.order[] as $id | .by[$id]]}
   ' < "$LEDGER"
@@ -262,35 +297,81 @@ cmd_add() {
   printf '%s\n' "$id"
 }
 
+pending_inbox() {  # <fm-inbox.sh args...>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-inbox.sh" "$@"
+}
+
+# Record <outcome> on answer note <note-id> for ledger entry <id>, whose
+# generation is its id. The close is already durable, so a failed write names
+# the retry, which is idempotent, rather than reporting success.
+record_note_outcome() {  # <note-id> <outcome> <id>
+  pending_inbox record-outcome "$1" --outcome "$2" --generation-seen "$3" >/dev/null \
+    || fail "the $2 result for $3 is durable, but it was not recorded on inbox note $1; re-run this same command to record it"
+}
+
 cmd_close() {  # <answer|drop> <args...>
-  local verb=$1 id='' note='' fold status event
+  local verb=$1 id='' note='' note_set=0 note_ref='' record fold entry status closed_ref applied event
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
-      --note) [ $# -ge 2 ] || usage_fail "--note needs a value"; note=$2; shift 2 ;;
+      --note) [ $# -ge 2 ] || usage_fail "--note needs a value"; note=$2; note_set=1; shift 2 ;;
+      --note-ref) [ $# -ge 2 ] || usage_fail "--note-ref needs a value"; note_ref=$2; shift 2 ;;
       --*) usage_fail "unknown $verb option: $1" ;;
       *) [ -z "$id" ] || usage_fail "$verb takes one id"; id=$1; shift ;;
     esac
   done
   [ -n "$id" ] || usage_fail "$verb needs an entry id"
+  if [ -n "$note_ref" ]; then
+    # A console answer note names this entry at its only version, its id; its
+    # body - the captain's words - is the note unless --note is given.
+    record=$(pending_inbox show --json "$note_ref" 2>/dev/null) || fail "no inbox note $note_ref in this home"
+    [ "$(printf '%s' "$record" | jq -r '"\(.answer_to.source):\(.answer_to.request)@\(.answer_to.generation)"')" = "ledger:$id@$id" ] \
+      || fail "inbox note $note_ref does not answer ledger entry $id"
+    [ "$note_set" = 1 ] || note=$(printf '%s' "$record" | jq -j '.body')
+  fi
   [ "$(byte_len "$note")" -le "$MAX_TEXT_BYTES" ] || usage_fail "the note exceeds $MAX_TEXT_BYTES bytes"
+  case "$verb" in
+    answer) applied=answered ;;
+    drop) applied=dropped ;;
+  esac
 
   lock_ledger
   fold=$(ledger_fold) || fail "cannot read $LEDGER"
-  status=$(printf '%s' "$fold" | jq -r --arg id "$id" \
-    'first(.entries[] | select(.id == $id) | .status) // empty')
+  entry=$(printf '%s' "$fold" | jq -c --arg id "$id" 'first(.entries[] | select(.id == $id)) // empty')
+  status=$(printf '%s' "$entry" | jq -r '.status // empty')
+  if [ -n "$note_ref" ] && [ "$status" != open ]; then
+    closed_ref=$(printf '%s' "$entry" | jq -r '.note_ref // empty')
+    if [ -n "$status" ] && [ "$status" = "$applied" ] && [ "$closed_ref" = "$note_ref" ]; then
+      # An exact retry: the close this note made is already durable.
+      record_note_outcome "$note_ref" "$applied" "$id"
+      unlock_ledger
+      printf '%s: %s\n' "$applied" "$id"
+      return 0
+    fi
+    if [ -z "$status" ]; then
+      record_note_outcome "$note_ref" not-found "$id"
+      unlock_ledger
+      printf 'not-found: %s\n' "$id"
+      printf 'fm-captain-pending: no ledger entry %s; nothing was changed\n' "$id" >&2
+    else
+      record_note_outcome "$note_ref" already-closed "$id"
+      unlock_ledger
+      printf 'already-closed: %s\n' "$id"
+      printf 'fm-captain-pending: entry %s is already %s; nothing was changed\n' "$id" "$status" >&2
+    fi
+    exit 4
+  fi
   [ -n "$status" ] || fail "no ledger entry $id"
   [ "$status" = open ] || fail "entry $id is already $status"
-  event=$(jq -n -c --arg id "$id" --arg event "$verb" --arg note "$note" \
+  event=$(jq -n -c --arg id "$id" --arg event "$verb" --arg note "$note" --arg note_ref "$note_ref" \
     --arg at "$(now_iso)" --argjson epoch "$(now_epoch)" '
     {v:1, event:$event, id:$id, note:(if $note == "" then null else $note end),
-     at:$at, epoch:$epoch}') || fail "cannot encode the close"
+     at:$at, epoch:$epoch}
+    + (if $note_ref == "" then {} else {note_ref:$note_ref} end)') || fail "cannot encode the close"
   append_event "$event"
+  [ -z "$note_ref" ] || record_note_outcome "$note_ref" "$applied" "$id"
   unlock_ledger
-  case "$verb" in
-    answer) printf 'answered: %s\n' "$id" ;;
-    drop) printf 'dropped: %s\n' "$id" ;;
-  esac
+  printf '%s: %s\n' "$applied" "$id"
 }
 
 cmd_show() {
@@ -317,13 +398,16 @@ cmd_show() {
     (if .key then "key: \(.key)" else empty end),
     (if .closed then "\(.status): \(.closed)" else empty end),
     "text: \(.text)",
-    (if .note then "note: \(.note)" else empty end)'
+    (if .note then "note: \(.note)" else empty end),
+    (if .note_ref then "answer note: \(.note_ref)" else empty end)'
 }
 
 # Build the combined view JSON from the ledger fold and an optional snapshot.
 # Inputs are files so a large snapshot never rides on the command line.
-build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <now-epoch> <now-iso> <paused-verb>
-  local fold_file=$1 snap_file=$2 reason=$3 today=$4 now=$5 now_iso=$6 paused_verb=$7 snap_args
+# <backlog-unread> is why the snapshot's markdown backlog parse is not this
+# home's live backlog (empty when it is); its captain holds are then unknown.
+build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <now-epoch> <now-iso> <paused-verb> <backlog-unread>
+  local fold_file=$1 snap_file=$2 reason=$3 today=$4 now=$5 now_iso=$6 paused_verb=$7 backlog_unread=$8 snap_args
   if [ -n "$snap_file" ]; then
     snap_args="$snap_file"
   else
@@ -338,10 +422,33 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
     --arg generated "$now_iso" \
     --arg fm_home "$FM_HOME" \
     --arg ledger_path "$LEDGER" \
-    --arg paused_verb "$paused_verb" '
+    --arg paused_verb "$paused_verb" \
+    --arg backlog_unread "$backlog_unread" '
     ($fold[0]) as $ledger
     | ($snaps[0] // null) as $snap
-    | ([ $snap.backlog.records[]? | select(.structured == true) ]) as $rows
+    | (if $backlog_unread != "" then []
+       else [ $snap.backlog.records[]? | select(.structured == true) ] end) as $rows
+    # Every source this view could not read in full. A missing source makes the
+    # counts a lower bound: nothing it holds may read as zero or complete.
+    | ($snap.secondmate_current // null) as $sm
+    | (if $snap == null then
+         [ {source:"backlog", reason:$reason}, {source:"status", reason:$reason} ]
+       else
+         (if $backlog_unread != "" then [ {source:"backlog", reason:("captain holds unknown: " + $backlog_unread)} ] else [] end)
+         + (if $sm == null or ($sm.registry.complete // true) == true then []
+            else [ {source:"secondmates", reason:("the secondmate registry was not read in full"
+                     + (if ($sm.registry.reason // null) != null then ": " + $sm.registry.reason else "" end))} ] end)
+         + (if ($sm.truncated // 0) > 0
+            then [ {source:"secondmates", reason:"\($sm.truncated) registered secondmate(s) beyond the snapshot bound were not read"} ]
+            else [] end)
+         + [ $sm.records[]?
+             | if .provenance.selected != "structured-home" then
+                 {source:("secondmate:" + .id), reason:(.current.reason // "secondmate summary unavailable")}
+               elif (.counts.decisions_open // 0) > ((.decisions_open // []) | length) then
+                 {source:("secondmate:" + .id),
+                  reason:"secondmate captain calls cut to \((.decisions_open // []) | length) of \(.counts.decisions_open)"}
+               else empty end ]
+       end) as $missing
     | ([ $snap.tasks[]? ]) as $tasks
     | def row($id): first($rows[] | select(.id == $id)) // null;
       def task($id): first($tasks[] | select(.id == $id)) // null;
@@ -360,10 +467,16 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
         elif $s < 3600 then {seconds:$s, text:"\(($s / 60) | floor)m"}
         elif $s < 86400 then {seconds:$s, text:"\(($s / 3600) | floor)h"}
         else {seconds:$s, text:"\(($s / 86400) | floor)d"} end;
-      def item($source; $kind; $key; $task_id; $age; $label; $live; $text; $due; $created):
+      # bucket is the one exact state of the item; generation is the version a
+      # reply binds to, null where no source gives one; reply names the
+      # inbox-note reference a console sends with the words of the captain.
+      def item($source; $kind; $key; $task_id; $age; $label; $live; $text; $due; $created; $bucket; $generation):
         {id:.id, source:$source, kind:$kind, key:$key, task_id:$task_id,
          age_seconds:$age.seconds, age:$age.text, task_state:task_state($task_id),
-         label:$label, live:$live, text:$text, due:$due, created:$created};
+         label:$label, live:$live, text:$text, due:$due, created:$created,
+         bucket:$bucket, generation:$generation,
+         reply:(if $generation == null then null
+                else {via:"inbox-note", answer_to:($source + ":" + .id + "@" + $generation)} end)};
       def hold_text: (.title // .id) + (if .hold_reason then ": " + .hold_reason else "" end);
       def timed_hold: (.hold_set // "") | test("T");
       # A hold-set stamp with a time gives an exact age and creation time; a
@@ -379,37 +492,39 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
        | item("ledger"; .kind; .key; .task;
               age_of(if .created_epoch == null then null else ($now - .created_epoch) end);
               (if .due != null and .due < $today then "overdue" else "open" end);
-              true; .text; .due; .created) ]) as $ledger_items
+              true; .text; .due; .created; "live"; .id) ]) as $ledger_items
 
     | ([ $rows[] | select(held)
          | (.hold_kind // "held") as $hk
          | hold_created as $created
+         | (.hold_generation // null) as $generation
          | if $hk == "captain" then
              if .hold_bucket == "blocked" then
                {section:"other", v:item("backlog"; $hk; null; .id; hold_age;
-                 "blocked-by " + (.unresolved_blocker_ids | join(",")); false; hold_text; null; $created)}
+                 "blocked-by " + (.unresolved_blocker_ids | join(",")); false; hold_text; null; $created;
+                 "blocked"; $generation)}
              elif expired then
                {section:"waiting", v:item("backlog"; $hk; null; .id; hold_age;
-                 "expired " + .hold_until; false; hold_text; null; $created)}
+                 "expired " + .hold_until; false; hold_text; null; $created; "needs_recheck"; $generation)}
              elif .hold_bucket == "dated" then
                {section:"order", v:item("backlog"; $hk; null; .id; hold_age;
-                 "until " + .hold_until; false; hold_text; null; $created)}
+                 "until " + .hold_until; false; hold_text; null; $created; "deferred"; $generation)}
              elif .hold_bucket == "aged" then
                {section:"waiting", v:item("backlog"; $hk; null; .id; hold_age;
-                 "aged"; false; hold_text; null; $created)}
+                 "aged"; false; hold_text; null; $created; "needs_recheck"; $generation)}
              else
                {section:"waiting", v:item("backlog"; $hk; null; .id; hold_age;
-                 "live"; true; hold_text; null; $created)}
+                 "live"; true; hold_text; null; $created; "live"; $generation)}
              end
            elif $hk == "parked" then
              {section:"order", v:item("backlog"; $hk; null; .id; hold_age;
                (if expired then "expired " + .hold_until
                 elif .hold_until != null then "parked until " + .hold_until
-                else "parked" end); false; hold_text; null; $created)}
+                else "parked" end); false; hold_text; null; $created; "parked"; null)}
            else
              {section:"other", v:item("backlog"; $hk; null; .id; hold_age;
                (if expired then "expired " + .hold_until else $hk end);
-               false; hold_text; null; $created)}
+               false; hold_text; null; $created; "other"; null)}
            end ]) as $hold_items
 
     | ([ $tasks[] as $t
@@ -423,7 +538,9 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
             v:item("status"; $d.verb; $d.key; $t.id; age_of(null);
                (if $shadowed then "stale?" elif $d.verb == "blocked" then "blocked" else "live" end);
                (($shadowed | not) and $d.verb == "needs-decision");
-               $d.summary; null; null)} ]) as $status_items
+               $d.summary; null; null;
+               (if $shadowed then "stale" elif $d.verb == "blocked" then "blocked" else "live" end);
+               null)} ]) as $status_items
 
     | ($ledger_items
        + [ $hold_items[] | select(.section == "waiting") | .v ]
@@ -431,17 +548,27 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
     | ([ $hold_items[] | select(.section == "order") | .v ]) as $order
     | ([ $hold_items[] | select(.section == "other") | .v ]
        + [ $status_items[] | select(.section == "other") | .v ]) as $other
-    | {
+    | ([ $waiting[], $order[], $other[] ]) as $all
+    | def bucket_count($b): [ $all[] | select(.bucket == $b) ] | length;
+      {
         schema:"fm-captain-pending-list.v1",
         generated:$generated,
         fm_home:$fm_home,
         ledger:{path:$ledger_path, present:$ledger.present, unreadable_lines:$ledger.unreadable},
         fleet:{available:($snap != null), reason:(if $snap != null then null else $reason end)},
+        coverage:{complete:(($missing | length) == 0), missing:$missing},
         counts:{
-          live:([ $waiting[], $order[], $other[] | select(.live) ] | length),
+          live:([ $all[] | select(.live) ] | length),
           waiting_on_captain:($waiting | length),
           paused_by_captain_order:($order | length),
-          paused_other_reason:($other | length)
+          paused_other_reason:($other | length),
+          needs_recheck:bucket_count("needs_recheck"),
+          deferred:bucket_count("deferred"),
+          blocked:bucket_count("blocked"),
+          parked:bucket_count("parked"),
+          other:bucket_count("other"),
+          stale:bucket_count("stale"),
+          total:($all | length)
         },
         waiting_on_captain:$waiting,
         paused_by_captain_order:$order,
@@ -470,7 +597,7 @@ render_view() {  # <ledger-only 0|1>; reads the view JSON on stdin
     else
       (if .fleet.available | not then
          "INCOMPLETE: backlog and status sources unavailable (\(.fleet.reason)); only the ledger is shown"
-       else empty end),
+       else (.coverage.missing[] | "INCOMPLETE: \(.source): \(.reason)") end),
       "live asks: \(.counts.live)",
       section("WAITING ON CAPTAIN"; .waiting_on_captain),
       section("PAUSED BY CAPTAIN ORDER"; .paused_by_captain_order),
@@ -479,8 +606,32 @@ render_view() {  # <ledger-only 0|1>; reads the view JSON on stdin
   '
 }
 
+# Why the fleet snapshot's backlog parse - the markdown data/backlog.md it reads
+# - is not this home's live backlog; nothing when it is. A home with no data
+# directory records no captain calls, so that is not unread.
+backlog_unread_reason() {
+  local data root backend
+  [ -d "$DATA" ] || return 0
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+  # shellcheck source=bin/fm-backlog-transition-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  if ! data=$(fm_backlog_data_absolute "$DATA" 2>/dev/null) || ! root=$(fm_backlog_root "$data" 2>/dev/null); then
+    printf 'the data directory %s cannot be resolved' "$DATA"
+    return 0
+  fi
+  if ! backend=$(fm_tasks_axi_backend_resolve "$root" 2>/dev/null); then
+    printf 'the backlog backend configuration under %s cannot be read' "$root"
+    return 0
+  fi
+  [ "$backend" = markdown ] \
+    || printf 'this home keeps its backlog in the %s backend, which this view does not read' "$backend"
+}
+
 cmd_list() {
-  local json=0 ledger_only=0 fold_file snap_file='' reason='' today now now_iso_v view paused_verb rc=0 err_file
+  local json=0 ledger_only=0 fold_file snap_file='' reason='' today now now_iso_v view paused_verb rc=0 err_file backlog_unread=''
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
@@ -514,9 +665,10 @@ cmd_list() {
       snap_file=''
       rc=3
     fi
+    [ -z "$snap_file" ] || backlog_unread=$(backlog_unread_reason)
   fi
 
-  view=$(build_view "$fold_file" "$snap_file" "$reason" "$today" "$now" "$now_iso_v" "$paused_verb") \
+  view=$(build_view "$fold_file" "$snap_file" "$reason" "$today" "$now" "$now_iso_v" "$paused_verb" "$backlog_unread") \
     || fail "cannot build the combined view"
   if [ "$json" = 1 ]; then
     printf '%s\n' "$view" | jq .

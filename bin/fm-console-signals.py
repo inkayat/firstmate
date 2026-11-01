@@ -45,6 +45,14 @@ PENDING_SCHEMA = "fm-captain-pending-list.v1"
 PENDING_SECTIONS = ("waiting_on_captain", "paused_by_captain_order", "paused_other_reason")
 PENDING_CACHE = ".console-signals-pending.json"
 PENDING_MAX_AGE = 60
+REQUESTS_MAX = 64
+REQUEST_ID_MAX = 128
+MISSING_MAX = 16
+GENERATION = re.compile(r"[A-Za-z0-9:#._-]{1,200}\Z")
+REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+# Bucket order of the request index: what the captain can act on first.
+BUCKETS = ("live", "needs_recheck", "deferred", "blocked", "stale", "parked", "other")
+COUNT_KEYS = ("live", "needs_recheck", "deferred", "blocked", "parked", "other", "stale", "total")
 
 # CSI (7- and 8-bit), OSC, DCS/SOS/PM/APC strings, and two-byte ESC sequences.
 ESCAPES = re.compile(
@@ -187,7 +195,11 @@ def cached_view(cache: str, fingerprint: list) -> dict | None:
         with open(cache, encoding="utf-8") as f:
             cached = json.load(f)
         view = cached.get("view")
-        if cached.get("fingerprint") == fingerprint and view.get("schema") == PENDING_SCHEMA:
+        # A view cached by an older engine lacks the exact counts or its
+        # coverage; read anew.
+        if cached.get("fingerprint") == fingerprint and view.get("schema") == PENDING_SCHEMA \
+                and all(k in (view.get("counts") or {}) for k in COUNT_KEYS) \
+                and (view.get("coverage") or {}).get("complete") is True:
             return view
     except (OSError, ValueError, AttributeError):
         pass
@@ -196,10 +208,11 @@ def cached_view(cache: str, fingerprint: list) -> dict | None:
 
 def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
     """(view, complete) from `fm-captain-pending.sh list --json`, or None.
-    complete is False when its fleet snapshot was unavailable (exit 3): the
-    view then holds the ledger alone. With use_cache, a complete view is kept
-    in state/ and reused for up to PENDING_MAX_AGE seconds while the
-    fingerprint of what it reads is unchanged."""
+    complete is False when the view did not read every source: its fleet
+    snapshot was unavailable (exit 3), when the view then holds the ledger
+    alone, or its coverage names a source it could not read. With use_cache,
+    a complete view is kept in state/ and reused for up to PENDING_MAX_AGE
+    seconds while the fingerprint of what it reads is unchanged."""
     cache = os.path.join(args.home, "state", PENDING_CACHE)
     fingerprint = pending_fingerprint(args.home)
     if use_cache:
@@ -215,7 +228,8 @@ def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
     if not isinstance(view, dict) or view.get("schema") != PENDING_SCHEMA:
         diag("captain-pending view unreadable: " + (err.strip().splitlines() or ["exit %s" % rc])[-1])
         return None
-    complete = rc == 0 and (view.get("fleet") or {}).get("available") is True
+    complete = rc == 0 and (view.get("fleet") or {}).get("available") is True \
+        and (view.get("coverage") or {}).get("complete") is True
     if complete and use_cache:
         try:
             publish_file(os.path.dirname(cache), PENDING_CACHE,
@@ -223,6 +237,21 @@ def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
         except OSError as exc:
             diag("captain-pending view not cached: %s" % exc)
     return view, complete
+
+
+def reply_reference(item: dict) -> tuple:
+    """(generation, answer_to) of a view item: its generation when well formed,
+    and its inbox-note reference only when the view offers one for exactly
+    this source, canonical id, and generation."""
+    gen = item.get("generation")
+    gen = gen if isinstance(gen, str) and GENERATION.match(gen) else None
+    reply = item.get("reply")
+    ref = reply.get("answer_to") if isinstance(reply, dict) else None
+    rid = item.get("id")
+    if not (gen and isinstance(rid, str) and REQUEST_ID.match(rid)
+            and ref == "%s:%s@%s" % (item.get("source"), rid, gen)):
+        ref = None
+    return gen, ref
 
 
 def questions_from(view: dict) -> tuple:
@@ -254,16 +283,105 @@ def questions_from(view: dict) -> tuple:
         created = i.get("created")
         if isinstance(created, str) and FULL_TIME.match(created):
             q["since"] = created
+        # Additive keys: which request this is, its version, and whether the
+        # text above is whole; only a whole text may be answered from here.
+        gen, ref = reply_reference(i)
+        truncated = len(clean(i.get("text"), True).encode("utf-8")) > TEXT_MAX
+        q["request_id"] = text(i.get("id"), REQUEST_ID_MAX)
+        q["source"] = i.get("source") if i.get("source") in ("ledger", "backlog", "status") else "unknown"
+        if q["source"] == "status" and isinstance(i.get("key"), str):
+            q["key"] = text(i["key"], REQUEST_ID_MAX)
+        q["generation"] = gen
+        q["text_truncated"] = truncated
+        if ref and not truncated:
+            q["answer_to"] = ref
         questions.append(q)
     return questions, len(live) - len(questions)
 
 
-def waiting_from(questions: list, left_out: int, complete: bool) -> dict:
+def view_items(view: dict) -> list:
+    return [i for section in PENDING_SECTIONS for i in (view.get(section) or []) if isinstance(i, dict)]
+
+
+def requests_from(view: dict) -> list:
+    """Every open item of the view, compact, ordered by bucket (live first)
+    and otherwise as the view lists them; the caller bounds it."""
+    rank = {b: n for n, b in enumerate(BUCKETS)}
+    items = sorted(view_items(view), key=lambda i: rank.get(i.get("bucket"), len(BUCKETS)))
+    out = []
+    for i in items:
+        rid = text(i.get("id"), REQUEST_ID_MAX)
+        if not rid:
+            continue
+        gen, _ = reply_reference(i)
+        r = {"id": rid,
+             "source": i.get("source") if i.get("source") in ("ledger", "backlog", "status") else "unknown",
+             "bucket": i.get("bucket") if i.get("bucket") in BUCKETS else "other",
+             "generation": gen}
+        if r["source"] == "status" and isinstance(i.get("key"), str):
+            r["key"] = text(i["key"], REQUEST_ID_MAX)
+        first_line = clean(i.get("text"), True).split("\n", 1)[0]
+        r["subject"] = cut(first_line, TOPIC_MAX)
+        created = i.get("created")
+        if isinstance(created, str) and FULL_TIME.match(created):
+            r["since"] = created
+        out.append(r)
+    return out
+
+
+def counts_from(view: dict) -> dict:
+    counts = view.get("counts") or {}
+    out = {}
+    for key in COUNT_KEYS:
+        value = counts.get(key)
+        if type(value) is not int or value < 0:
+            raise ValueError("the captain-pending view has no exact %s count" % key)
+        out[key] = value
+    return out
+
+
+def coverage_from(view: dict, complete: bool) -> dict:
+    """The view's coverage, bounded: missing names each source it could not
+    read (backlog, status, secondmates, secondmate:<id>), once, and
+    missing_reasons says why."""
+    entries = [m for m in ((view.get("coverage") or {}).get("missing") or []) if isinstance(m, dict)]
+    if not complete and not entries:
+        entries = [{"source": "backlog", "reason": "not read"}, {"source": "status", "reason": "not read"}]
+    missing, reasons = [], []
+    for m in entries:
+        source = text(m.get("source"), REQUEST_ID_MAX) or "unknown"
+        if source not in missing:
+            missing.append(source)
+        reasons.append({"source": source, "reason": text(m.get("reason"), REASON_MAX) or "not read"})
+    unreadable = (view.get("ledger") or {}).get("unreadable_lines")
+    return {"complete": complete,
+            "missing": missing[:MISSING_MAX],
+            "missing_reasons": reasons[:MISSING_MAX],
+            "missing_omitted": max(len(missing) - MISSING_MAX, 0),
+            "ledger_unreadable_lines": unreadable if isinstance(unreadable, int) else 0}
+
+
+def coverage_notes(missing: list) -> list:
+    """What the wait reason says is unread, so prose never claims a whole list."""
+    notes = []
+    if "backlog" in missing and "status" in missing:
+        notes.append("holds and status decisions unreadable")
+    elif "backlog" in missing:
+        notes.append("captain holds unreadable")
+    elif "status" in missing:
+        notes.append("status decisions unreadable")
+    if any(m == "secondmates" or m.startswith("secondmate:") for m in missing):
+        notes.append("secondmate calls unreadable")
+    if any(m not in ("backlog", "status", "secondmates") and not m.startswith("secondmate:") for m in missing):
+        notes.append("some sources unreadable")
+    return notes
+
+
+def waiting_from(questions: list, left_out: int, unread: list) -> dict:
     if not questions:
         return {"state": "none"}
     first = questions[0]
-    notes = (["+%d more waiting" % left_out] if left_out else []) + \
-        ([] if complete else ["holds and status decisions unreadable"])
+    notes = (["+%d more waiting" % left_out] if left_out else []) + unread
     reason = first.get("topic") or clean(first["text"], False)
     if notes:
         reason += " (%s)" % "; ".join(notes)
@@ -386,19 +504,40 @@ def assemble(args: argparse.Namespace, use_cache: bool) -> bytes:
     if isinstance(unreadable, int) and unreadable > 0:
         diag("%d unreadable captain-pending ledger line(s) skipped" % unreadable)
     questions, left_out = questions_from(view)
+    coverage = coverage_from(view, complete)
+    unread = [] if complete else coverage_notes(coverage["missing"])
     if not complete and not questions:
-        raise ValueError("captain holds and status decisions unreadable and no ledger entry is open; "
-                         "nothing reliable to publish")
+        # With no readable item waiting, a document would say nothing waits:
+        # publish nothing, so the previous file ages instead.
+        raise ValueError("%s unreadable and nothing readable waits; nothing reliable to publish"
+                         % ", ".join(coverage["missing"]))
+    counts = counts_from(view)
+    requests = requests_from(view)
+    listed = requests[:REQUESTS_MAX]
+    generated = view.get("generated")
     doc = {
         "schema": SCHEMA,
         "home": args.home,
         "lock_pid": int(args.lock_pid),
         "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "waiting": waiting_from(questions, left_out, complete),
+        "waiting": waiting_from(questions, left_out, unread),
         "questions": questions,
         "bots": bots_from(args.bot_bin, args.home, args.code_root, args.timeout),
+        # Additive keys: exact counts from the source, what the view could not
+        # read, when it was computed, and every open request, bounded.
+        "counts": counts,
+        "coverage": coverage,
+        "view_generated_at": generated if isinstance(generated, str) and FULL_TIME.match(generated) else None,
+        "requests": listed,
+        "requests_omitted": counts["total"] - len(listed),
     }
     data = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    # The index yields room before anything else does: drop its last entries
+    # (the least actionable) and count them as omitted until the file fits.
+    while len(data) > FILE_MAX and doc["requests"]:
+        doc["requests"].pop()
+        doc["requests_omitted"] += 1
+        data = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     if len(data) > FILE_MAX:
         raise ValueError("document is %d bytes, over the %d-byte cap" % (len(data), FILE_MAX))
     return data

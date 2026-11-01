@@ -5094,6 +5094,192 @@ EOF
   pass "an answered captain call archived to a user-configured location still satisfies the completion gate"
 }
 
+# --- versioned answers through the console's answer notes -------------------
+
+run_inbox_in() {  # <home> <args...>
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-inbox.sh" "$@"
+}
+
+# The generation the combined view shows for <task-id>, empty when not listed.
+view_generation() {  # <home> <task-id>
+  PATH="$1/fakebin:$PATH" FM_HOME="$1" bash "$ROOT/bin/fm-captain-pending.sh" list --json \
+    | jq -r --arg id "$2" 'first(.waiting_on_captain[], .paused_by_captain_order[], .paused_other_reason[]
+        | select(.id == $id)) | .generation // empty'
+}
+
+view_text() {  # <home> <task-id>
+  PATH="$1/fakebin:$PATH" FM_HOME="$1" bash "$ROOT/bin/fm-captain-pending.sh" list --json \
+    | jq -r --arg id "$2" 'first(.waiting_on_captain[], .paused_by_captain_order[], .paused_other_reason[]
+        | select(.id == $id)) | .text // empty'
+}
+
+answer_note() {  # <home> <reply-id> <answer-to> <words>: prints the note id
+  printf '%s' "$4" | run_inbox_in "$1" note --request-id "$2" --answer-to "$3" --json - | jq -r .id
+}
+
+note_outcome() {  # <home> <note-id>: outcome|generation-after
+  run_inbox_in "$1" show --json "$2" | jq -r '"\(.outcome.outcome // "none")|\(.outcome.generation_after // "null")"'
+}
+
+resolution_count() {  # <home> <task-id>
+  tasks_in "$1" show "$2" --full | grep -o 'Resolution recorded by fm-captain-hold' | wc -l | tr -d ' '
+}
+
+test_console_answer_applies_only_the_version_it_answered() {
+  local home id g1 g2 n1 n2 n3 rc show reason g
+  home=$(make_home versioned-answer)
+  id=sample-route-call
+  reason=$'Route (north) or (south)?\nNotes: café ✓'
+  run_captain "$home" hold "$id" --title "Choose   the route see https://example.com/routes" \
+    --reason "$reason" --repo sample >/dev/null || fail "could not hold the call"
+  g1=$(view_generation "$home" "$id")
+  [ -n "$g1" ] || fail "the view shows no generation for a live hold"
+  run_captain "$home" hold "$id" --reason "$reason" >/dev/null || fail "an identical re-hold failed"
+  assert_equals "$g1" "$(view_generation "$home" "$id")" "an identical re-hold must not invalidate the version"
+  n1=$(answer_note "$home" reply-1 "backlog:$id@$g1" "North, please.")
+
+  run_captain "$home" hold "$id" --reason $'Route (north), (south), or (east)?' >/dev/null || fail "the rewrite failed"
+  g2=$(view_generation "$home" "$id")
+  assert_not_equals "$g1" "$g2" "a question rewritten in place must get a new version"
+  assert_equals "${g1%#*}" "${g2%#*}" "the in-place rewrite keeps the lifecycle stamp and answer count"
+  rc=0
+  run_captain "$home" answer "$id" --note-ref "$n1" > "$home/stale.out" 2>&1 || rc=$?
+  expect_code 4 "$rc" "an answer to a superseded version is refused"
+  assert_equals "stale-generation|$g2" "$(note_outcome "$home" "$n1")" \
+    "the refusal is recorded on the note with the current version"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: yes" "the refused answer changed the call"
+  assert_not_contains "$show" "Resolution recorded" "the refused answer wrote a resolution"
+  assert_equals "North, please." "$(run_inbox_in "$home" show --json "$n1" | jq -r .body)" \
+    "the refused captain's words stay on the note"
+
+  n2=$(answer_note "$home" reply-2 "backlog:$id@$g2" $'East.\nAvoid the (north) pass.')
+  run_captain "$home" answer "$id" --note-ref "$n2" >/dev/null || fail "the current-version answer did not apply"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" "the answered call did not close"
+  assert_contains "$show" "Request generation: $g2" "the record does not name the version it answered"
+  assert_contains "$show" "Answer note: $n2" "the record does not name the answer note"
+  assert_contains "$show" 'East.\nAvoid the (north) pass.' "the record lost the captain's exact words"
+  assert_equals "answered|null" "$(note_outcome "$home" "$n2")" "the applied outcome is not on the note"
+  assert_equals "" "$(view_generation "$home" "$id")" "the answered call is still listed"
+
+  run_captain "$home" answer "$id" --note-ref "$n2" >/dev/null || fail "an exact replay was not idempotent"
+  assert_equals 1 "$(resolution_count "$home" "$id")" "a replay recorded a second resolution"
+  n3=$(answer_note "$home" reply-3 "backlog:$id@$g2" "West.")
+  rc=0
+  run_captain "$home" answer "$id" --note-ref "$n3" >/dev/null 2>&1 || rc=$?
+  expect_code 4 "$rc" "a second reply to an already answered version is refused"
+  assert_equals "already-closed|null" "$(note_outcome "$home" "$n3")" "the late reply's outcome is not recorded"
+  assert_equals 1 "$(resolution_count "$home" "$id")" "the late reply recorded a resolution"
+  rc=0
+  run_captain "$home" answer sample-other-call --note-ref "$n2" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "a note is applied only to the request it answers"
+
+  run_captain "$home" hold sample-size-call --title "Pick a size" --reason "Small or large?" --repo sample >/dev/null \
+    || fail "could not hold the size call"
+  g=$(view_generation "$home" sample-size-call)
+  printf 'Large.\n' > "$home/large.txt"
+  rc=0
+  run_captain "$home" answer sample-size-call --decision-file "$home/large.txt" --expect "${g%#*}#0" >/dev/null 2>&1 || rc=$?
+  expect_code 4 "$rc" "an explicit expected version that differs is refused"
+  assert_contains "$(tasks_in "$home" show sample-size-call --full)" "held: yes" "the refused --expect changed the call"
+  run_captain "$home" answer sample-size-call --decision-file "$home/large.txt" --expect "$g" >/dev/null \
+    || fail "the matching explicit expected version did not apply"
+  pass "a console answer applies only to the version it answered, once, with its outcome on the note"
+}
+
+test_partial_console_answer_keeps_the_remaining_questions_held() {
+  local home id g1 g2 n1 n2 n3 rc show out
+  home=$(make_home partial-answer)
+  id=sample-plan-call
+  run_captain "$home" hold "$id" --title "Plan review" \
+    --reason $'Q1: scope (A) or (B)?\nQ2: date?\nQ3: owner?' --repo sample >/dev/null || fail "could not hold the call"
+  g1=$(view_generation "$home" "$id")
+  n1=$(answer_note "$home" reply-p1 "backlog:$id@$g1" "Q1: (A).")
+  printf 'Q2: date?\nQ3: owner?\n' > "$home/remaining.txt"
+  out=$(run_captain "$home" answer "$id" --note-ref "$n1" --remaining-file "$home/remaining.txt") \
+    || fail "the partial answer did not apply"
+  assert_equals "partial: $id" "$out" "the partial answer did not report itself"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "held: yes" "a partial answer must keep the call held"
+  assert_contains "$show" "Resolution mode: partial" "the partial answer was not recorded"
+  assert_contains "$show" "Q1: (A)." "the partial answer lost the captain's words"
+  assert_equals $'Plan review: Q2: date?\nQ3: owner?' "$(view_text "$home" "$id")" "the call does not show only the remaining questions"
+  g2=$(view_generation "$home" "$id")
+  assert_not_equals "$g1" "$g2" "a partial answer must change the version"
+  assert_equals "${g1%%#*}" "${g2%%#*}" "a partial answer keeps the call's hold-set stamp"
+  assert_equals "partial|$g2" "$(note_outcome "$home" "$n1")" "the partial outcome does not name the new version"
+
+  run_captain "$home" answer "$id" --note-ref "$n1" --remaining-file "$home/remaining.txt" >/dev/null \
+    || fail "an exact partial replay was not idempotent"
+  assert_equals "1|$g2" "$(resolution_count "$home" "$id")|$(view_generation "$home" "$id")" \
+    "a partial replay recorded twice or moved the version"
+  n2=$(answer_note "$home" reply-p2 "backlog:$id@$g1" "Q1: (B).")
+  rc=0
+  run_captain "$home" answer "$id" --note-ref "$n2" >/dev/null 2>&1 || rc=$?
+  expect_code 4 "$rc" "an answer to the version before the partial answer is refused"
+  assert_equals "stale-generation|$g2" "$(note_outcome "$home" "$n2")" "the stale refusal does not name the new version"
+  n3=$(answer_note "$home" reply-p3 "backlog:$id@$g2" "Q2: Friday. Q3: me.")
+  run_captain "$home" answer "$id" --note-ref "$n3" >/dev/null || fail "the remaining answer did not apply"
+  assert_equals "2|answered|null" "$(resolution_count "$home" "$id")|$(note_outcome "$home" "$n3")" \
+    "the remaining answer did not close the call on top of the partial record"
+  pass "a partial console answer records the words and keeps only the remaining questions held, under a new version"
+}
+
+test_console_answer_outcome_recovers_after_an_interrupted_apply() {
+  local home id g n rc
+  home=$(make_home interrupted-outcome)
+  id=sample-crash-call
+  run_captain "$home" hold "$id" --title "Crash window" --reason "Keep or drop?" --repo sample >/dev/null \
+    || fail "could not hold the call"
+  g=$(view_generation "$home" "$id")
+  n=$(answer_note "$home" reply-c1 "backlog:$id@$g" "Keep it.")
+  # The outcome directory cannot be created, as if the process died between
+  # the durable answer and its outcome.
+  printf 'not a directory\n' > "$home/state/inbox/.outcomes"
+  rc=0
+  run_captain "$home" answer "$id" --note-ref "$n" > "$home/crash.out" 2>&1 || rc=$?
+  assert_not_equals 0 "$rc" "an apply whose outcome was lost must not report success"
+  assert_contains "$(tasks_in "$home" show "$id" --full)" "state: done" "the durable answer was not applied"
+  assert_equals "none|null" "$(note_outcome "$home" "$n")" "an outcome appeared without being written"
+  rc=0
+  run_inbox_in "$home" drain --ack "$n" >/dev/null 2>&1 || rc=$?
+  expect_code 1 "$rc" "the note without its outcome could be marked handled"
+  rm -f "$home/state/inbox/.outcomes"
+  run_captain "$home" answer "$id" --note-ref "$n" >/dev/null || fail "the retry did not finish the interrupted apply"
+  assert_equals "answered|null|1" "$(note_outcome "$home" "$n")|$(resolution_count "$home" "$id")" \
+    "the retry did not record the outcome exactly once"
+  run_inbox_in "$home" drain --ack "$n" >/dev/null || fail "the recovered note could not be marked handled"
+  pass "an apply interrupted before its outcome recovers on retry without a second resolution"
+}
+
+test_concurrent_console_answers_apply_once() {
+  local home id g na nb ra=0 rb=0 pa pb
+  home=$(make_home concurrent-answers)
+  id=sample-race-call
+  run_captain "$home" hold "$id" --title "Race" --reason "Left or right?" --repo sample >/dev/null \
+    || fail "could not hold the call"
+  g=$(view_generation "$home" "$id")
+  na=$(answer_note "$home" reply-left "backlog:$id@$g" "Left.")
+  nb=$(answer_note "$home" reply-right "backlog:$id@$g" "Right.")
+  run_captain "$home" answer "$id" --note-ref "$na" > "$home/a.out" 2>&1 &
+  pa=$!
+  run_captain "$home" answer "$id" --note-ref "$nb" > "$home/b.out" 2>&1 &
+  pb=$!
+  wait "$pa" || ra=$?
+  wait "$pb" || rb=$?
+  assert_equals "04" "$(printf '%s\n%s\n' "$ra" "$rb" | sort | tr -d '\n')" \
+    "exactly one of two concurrent replies must apply and the other be refused"
+  assert_equals 1 "$(resolution_count "$home" "$id")" "two concurrent replies both recorded a resolution"
+  assert_equals "already-closed|null,answered|null" \
+    "$(printf '%s\n%s\n' "$(note_outcome "$home" "$na")" "$(note_outcome "$home" "$nb")" | sort | paste -sd, -)" \
+    "each reply did not get its own outcome"
+  pass "two concurrent replies to one version apply exactly once"
+}
+
 test_hold_reason_round_trips_awkward_characters
 test_hold_origins_follow_backend_holds
 test_interrupted_origin_move_does_not_inherit_the_previous_answer
@@ -5162,3 +5348,7 @@ test_captain_hold_mutations_address_the_beads_backend
 test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
 test_archived_answered_hold_still_satisfies_the_gate
 test_archived_answer_in_a_user_configured_archive_satisfies_the_gate
+test_console_answer_applies_only_the_version_it_answered
+test_partial_console_answer_keeps_the_remaining_questions_held
+test_console_answer_outcome_recovers_after_an_interrupted_apply
+test_concurrent_console_answers_apply_once
