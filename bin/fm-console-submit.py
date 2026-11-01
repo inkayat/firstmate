@@ -500,12 +500,33 @@ def cmd_status(channel: Channel, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# Create or remove the home's opt-in flag, then report the status document.
+# Only a plain file is ever created or removed, so a flag path that is a link
+# or anything else is refused untouched.
+def cmd_setup(channel: Channel, enable: bool) -> int:
+    flag = os.path.join(channel.config, "console-submit")
+    info = os.lstat(channel.config)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != channel.uid:
+        raise Failure(f"{channel.config} is not a directory owned by this user")
+    try:
+        current = os.lstat(flag)
+    except FileNotFoundError:
+        current = None
+    if current is not None and not stat.S_ISREG(current.st_mode):
+        raise Failure(f"{flag} is not a plain file; leaving it untouched")
+    if enable and current is None:
+        os.close(os.open(flag, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
+    elif not enable and current is not None:
+        os.unlink(flag)
+    return cmd_status(channel, argparse.Namespace(id=None))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="fm-console-submit.py", add_help=False)
     parser.add_argument("--state", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--code-root", required=True)
-    parser.add_argument("command", choices=["enqueue", "status"])
+    parser.add_argument("command", choices=["enqueue", "status", "enable", "disable"])
     parser.add_argument("--id")
     parser.add_argument("--from", dest="sender", default="astro")
     parser.add_argument("--reply-to", dest="reply_to")
@@ -516,11 +537,13 @@ def main() -> int:
             parser.error("give the id once")
         args.id = args.status_id
     elif args.status_id is not None:
-        parser.error("enqueue takes --id, not a positional id")
+        parser.error(f"{args.command} takes no positional id")
     channel = Channel(args.state, args.config, args.code_root)
     try:
         if args.command == "enqueue":
             return cmd_enqueue(channel, args)
+        if args.command in ("enable", "disable"):
+            return cmd_setup(channel, args.command == "enable")
         return cmd_status(channel, args)
     except (Failure, OSError) as error:
         sys.stderr.write(f"fm-console-submit: {error}\n")

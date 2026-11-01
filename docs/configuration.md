@@ -866,7 +866,7 @@ Publishing adds no model call, no network access, and no long-lived process: eac
 
 The optional local, gitignored `config/console-submit` presence flag opts this home, on this machine, into the console submit channel: a same-user console such as Astro's FirstMate page runs `bin/fm-console-submit.sh enqueue` to put the captain's own message into the omp primary's conversation as an ordinary user turn, and the answer streams back through the console journal.
 [console-submit.md](console-submit.md) owns the contract, including delivery, receipts, bounds, and trust, and [`bin/fm-console-submit.sh`](../bin/fm-console-submit.sh)'s header owns the command line.
-Create the flag with `touch "$FM_HOME/config/console-submit"`, then let the running omp primary load `.omp/extensions/fm-console-submit.ts` with `/reload`; remove the flag to stop it within half a second.
+A console's explicit link step creates it with `FM_HOME=<home> bin/fm-console-submit.sh enable` and removes it with `disable` (or `touch` and `rm` the file by hand); a running omp primary whose session already loaded `.omp/extensions/fm-console-submit.ts` starts or stops reading within half a second, and only a session started before that file existed needs `/reload`.
 The flag is a home-local choice and is not inherited by secondmate homes, and only an omp primary delivers.
 
 ## PR-ready line after green (config/ready-after-green)

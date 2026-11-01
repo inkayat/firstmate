@@ -8,6 +8,7 @@
 #                                         (the message text on stdin, raw UTF-8)
 #   FM_HOME=<home> fm-console-submit.sh status <id>
 #   FM_HOME=<home> fm-console-submit.sh status
+#   FM_HOME=<home> fm-console-submit.sh enable | disable
 #   fm-console-submit.sh --help
 #
 # docs/console-submit.md owns the contract (fm-console-submit.v1): the opt-in
@@ -29,9 +30,14 @@
 #            the TTL and refusing a handed message whose omp process is gone.
 #   status   fm-console-submit-status.v1: {enabled, consumer {live, pid,
 #            session_id}, queued, inflight, bounds}.
+#   enable | disable  create or remove this home's config/console-submit opt-in
+#            flag (a console's explicit link step for this one home; both are
+#            idempotent and enable never writes through a symbolic link), then
+#            print the fm-console-submit-status.v1 document.
 #
-# Exit: 0 queued, replay, or printed; 1 failure (FM_HOME not explicit, no
-# state directory, python3 missing, unreadable channel, classifier failure);
+# Exit: 0 queued, replay, printed, enabled, or disabled; 1 failure (FM_HOME not
+# explicit, no state or config directory, python3 missing, unreadable channel,
+# classifier failure, a flag path that is not a plain file);
 # 2 invalid input (usage, invalid, too-large, operational-format,
 # id-conflict); 3 disabled (enqueue) or unknown id (status); 4 queue-full or
 # rate-limited, worth retrying later.
@@ -56,7 +62,7 @@ die() {
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  enqueue|status) ;;
+  enqueue|status|enable|disable) ;;
   *) usage >&2; exit 2 ;;
 esac
 
