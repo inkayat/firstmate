@@ -7,11 +7,8 @@ This page owns the contract; [`bin/fm-console-submit.sh`](../bin/fm-console-subm
 ## Scope and opt-in
 
 - The local, gitignored `config/console-submit` presence flag enables the channel for one home on one machine; it is off by default and a secondmate home does not inherit it.
-- A console sets the flag the same way it sends: when the captain links a home to it and turns sending on, the console runs `FM_HOME=<home> bin/fm-console-submit.sh enable`, and turning sending off runs `disable`; both are idempotent, answer with the `status` document, and refuse a flag path that is not a plain file rather than write through it.
-- Linking a home to a console is not itself consent to send: nothing enables the channel unless that explicit step runs for that home.
 - Without the flag `enqueue` refuses with `disabled` and the primary reads and delivers nothing.
-- Removing the flag, by `disable` or by hand, is the kill switch: the primary stops reading within one 500 ms poll, a message already handed to omp is still reported, and queued messages wait under the TTL below until the flag returns.
-- A running omp primary that has the extension loaded starts reading within one poll of the flag appearing, with no reload.
+- Removing the flag is the kill switch: the primary stops reading within one 500 ms poll, a message already handed to omp is still reported, and queued messages wait under the TTL below until the flag returns.
 - Only an omp primary delivers: the extension loads in every omp session started in the home, and only the session with a UI whose process owns the home's session lock (`fm_session_lock_owned_by_self` in [`bin/fm-session-lock-lib.sh`](../bin/fm-session-lock-lib.sh), the journal's rule) reads the channel.
 - Pi, Pi-signed, and every other primary harness read nothing, so a message sent while one of them is the primary waits and then expires.
 - There is no network surface: the channel is files in the home's own state directory, written and read by the same OS user.
@@ -28,7 +25,7 @@ The directory is `<home>/state/console-submit/`, mode 0700; every file in it is 
 | `consumer.json` | The delivering omp process's pid and session id, while it owns the lock. |
 | `.tmp/`, `.lock`, `.seq`, `.rate` | Private working files. |
 
-- A console writes only by running `FM_HOME=<home> bin/fm-console-submit.sh enqueue` with the text on stdin, or `enable` and `disable` for the opt-in flag, never by creating files itself.
+- A console writes only by running `FM_HOME=<home> bin/fm-console-submit.sh enqueue` with the text on stdin, never by creating files itself.
 - After that only the delivering omp process and the script's `status` sweep change a message, and each first claims it with an atomic rename, so exactly one of them acts on it.
 
 ## Message
@@ -96,5 +93,5 @@ A queued file is one JSON object of at most 16 KiB: `schema` (`fm-console-submit
 
 ## Verification
 
-- [`tests/fm-console-submit.test.sh`](../tests/fm-console-submit.test.sh) covers the script's opt-in setup, validation, caps, idempotency, and sweeps, and the omp extension's ownership, idle and busy delivery, ordering, withdrawal, session end, and recovery through its factory with a fake omp host and synthetic omp 18.12.6 payloads.
+- [`tests/fm-console-submit.test.sh`](../tests/fm-console-submit.test.sh) covers the script's validation, caps, idempotency, and sweeps, and the omp extension's ownership, idle and busy delivery, ordering, withdrawal, session end, and recovery through its factory with a fake omp host and synthetic omp 18.12.6 payloads.
 - No live guard proves delivery against a real omp yet.

@@ -54,7 +54,7 @@ The shared no-mistakes gate lifecycle boundary is summarized in [architecture.md
 | `fm-capacity.sh`         | Report of open lanes against the optional `config/lane-capacity` target and host headroom for queued-work dispatch; `--publish` writes this home's `state/lane-capacity.json` |
 | `fm-console-signals.sh`  | Opt-in: publish this home's `fm-console-signals.v1` file (waiting state and questions from the captain-pending combined view, bots) for an external console; the watcher runs `write` each poll while `config/console-signals` exists |
 | `fm-console-signals.py`  | The assembly and atomic-write engine behind `fm-console-signals.sh` |
-| `fm-console-submit.sh`   | Opt-in: queue the captain's own message from a same-user console (`enqueue`, text on stdin) for the omp primary's conversation and read its receipt (`status`); `enable` and `disable` set the home's `config/console-submit` opt-in and [console-submit.md](console-submit.md) owns the contract |
+| `fm-console-submit.sh`   | Opt-in: queue the captain's own message from a same-user console (`enqueue`, text on stdin) for the omp primary's conversation and read its receipt (`status`); `config/console-submit` enables it and [console-submit.md](console-submit.md) owns the contract |
 | `fm-console-submit.py`   | The validation, queue, and receipt engine behind `fm-console-submit.sh` |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, main-session pending wakes, and unhealthy supervision |
 | `fm-primary-scope-lib.sh` | Shared marker-or-plain-checkout primary-home predicate for tracked hooks             |

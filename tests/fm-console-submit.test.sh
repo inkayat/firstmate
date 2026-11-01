@@ -236,40 +236,6 @@ test_enqueue_is_opt_in_and_needs_an_explicit_home() {
   pass "console submit: enqueue needs an explicit home and the config/console-submit opt-in"
 }
 
-# A console's link step turns the channel on and off for one explicit home
-# through the script, never by creating files itself; status reflects it.
-test_enable_and_disable_are_the_console_setup_path() {
-  local home out rc
-  home=$(new_home setup)
-  rc=0
-  out=$(env -u FM_HOME bash "$SUBMIT" enable 2>&1) || rc=$?
-  expect_code 1 "$rc" "enable without FM_HOME"
-  assert_absent "$home/config/console-submit" "enable without FM_HOME must create no flag"
-  out=$(submit_in "$home" enable) || fail "enable failed: $out"
-  assert_equals fm-console-submit-status.v1 "$(json_field "$out" schema)" "enable must answer with the status document"
-  assert_equals true "$(json_field "$out" enabled)" "enable must report the channel enabled"
-  [ -f "$home/config/console-submit" ] && [ ! -L "$home/config/console-submit" ] \
-    || fail "enable must create config/console-submit as a regular file"
-  out=$(submit_in "$home" enable) || fail "a second enable must succeed: $out"
-  assert_equals true "$(json_field "$out" enabled)" "a second enable must leave the channel enabled"
-  out=$(printf 'hello' | submit_in "$home" enqueue --id s1) || fail "enqueue after enable failed: $out"
-  assert_equals queued "$(json_field "$out" outcome)" "enable must open the channel to enqueue"
-  out=$(submit_in "$home" disable) || fail "disable failed: $out"
-  assert_equals false "$(json_field "$out" enabled)" "disable must report the channel disabled"
-  assert_absent "$home/config/console-submit" "disable must remove the flag"
-  out=$(submit_in "$home" disable) || fail "a second disable must succeed: $out"
-  rc=0
-  out=$(printf 'again' | submit_in "$home" enqueue --id s2) || rc=$?
-  expect_code 3 "$rc" "enqueue after disable"
-  assert_equals disabled "$(json_field "$out" reason)" "disable must close the channel to enqueue"
-  ln -s "$TMP_ROOT/elsewhere" "$home/config/console-submit"
-  rc=0
-  out=$(submit_in "$home" enable 2>&1) || rc=$?
-  expect_code 1 "$rc" "enable over a symbolic link"
-  assert_absent "$TMP_ROOT/elsewhere" "enable must never write through a symbolic link"
-  pass "console submit: enable and disable set one explicit home's opt-in, idempotently and never through a link"
-}
-
 test_enqueue_refuses_invalid_text_and_ids_without_writing() {
   local home out rc doorbell case_id
   home=$(new_home invalid flag)
@@ -717,7 +683,6 @@ JS
 }
 
 test_enqueue_is_opt_in_and_needs_an_explicit_home
-test_enable_and_disable_are_the_console_setup_path
 test_enqueue_refuses_invalid_text_and_ids_without_writing
 test_enqueue_is_idempotent_by_id
 test_concurrent_enqueues_keep_one_message_per_id
