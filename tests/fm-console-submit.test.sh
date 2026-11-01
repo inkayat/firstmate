@@ -491,7 +491,7 @@ await t.read(ext, omp, "after the taken-back one");
 await ext.emit("agent_end", { willContinue: false });
 omp.streaming = false;
 await t.waitFor(() => t.receipt("w2").state === "delivered", "w2");
-// omp rewrote the prompt's text (a ^model mention); the run it started settles.
+// omp rewrote the text of the prompt (a ^model mention); the run it started settles.
 t.enqueue("p1", "ask ^opus about it");
 await t.waitFor(() => omp.sent.length === 3, "the prompt");
 omp.streaming = true;
@@ -528,7 +528,7 @@ await ext.emit("session_shutdown");
 ext = await t.loadExt(omp);
 await ext.emit("session_start");
 await t.sleep(150);
-t.assert(t.receipt("r1").state === "queued", "a handoff still in omp's queue must wait for omp");
+t.assert(t.receipt("r1").state === "queued", "a handoff still in the omp queue must wait for omp");
 await t.read(ext, omp, "survives a reload");
 await t.waitFor(() => t.receipt("r1").state === "delivered", "r1 delivered after the reload");
 // omp read it while no extension listened: the branch proves it.
@@ -541,7 +541,7 @@ omp.streaming = false;
 ext = await t.loadExt(omp);
 await ext.emit("session_start");
 await t.waitFor(() => t.receipt("r2").state === "delivered", "r2 found in the branch");
-// A new session drops omp's queue: refused, never replayed.
+// A new session drops the omp queue: refused, never replayed.
 omp.streaming = true;
 t.enqueue("r3", "lost with the session");
 await t.waitFor(() => omp.sent.length === 3, "r3 handed over");
@@ -598,7 +598,7 @@ t.assert(omp.sent[0].text === "claimed but never sent" && omp.sent[0].deliverAs 
 await t.read(ext, omp, "claimed but never sent");
 await t.waitFor(() => t.receipt("d3").state === "delivered", "d3 delivered");
 await t.sleep(100);
-t.assert(omp.sent.length === 1, `a dead process's handoff must never be sent again: ${JSON.stringify(omp.sent)}`);
+t.assert(omp.sent.length === 1, `the handoff of a dead process must never be sent again: ${JSON.stringify(omp.sent)}`);
 console.log("ok");
 JS
   ) || fail "dead process: $out"
@@ -659,7 +659,7 @@ t.enqueue("x2", "the real words");
 const path = `${t.dir}/queue/x2.json`;
 const record = JSON.parse(readFileSync(path, "utf8"));
 writeFileSync(path, JSON.stringify({ ...record, text: "swapped words" }));
-// A consistent replacement: its own text and digest, not the receipt's.
+// A consistent replacement: its own text and digest, not those of the receipt.
 t.enqueue("x3", "the original");
 const other = `${t.dir}/queue/x3.json`;
 const replacement = { ...JSON.parse(readFileSync(other, "utf8")), text: "a replacement" };

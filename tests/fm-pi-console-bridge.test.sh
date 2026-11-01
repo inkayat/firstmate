@@ -429,8 +429,8 @@ try {
   await t.sleep(400);
   t.assertClean(bridge, scenario);
   if (scenario === "nested-session") {
-    t.assert(readdirSync(t.journalDir(home)).join(",") === "current.json", `${scenario}: files appeared beside the primary's record`);
-    t.assert(readFileSync(`${t.journalDir(home)}/current.json`, "utf8") === recorded, `${scenario}: the primary's record was rewritten`);
+    t.assert(readdirSync(t.journalDir(home)).join(",") === "current.json", `${scenario}: files appeared beside the record of the primary`);
+    t.assert(readFileSync(`${t.journalDir(home)}/current.json`, "utf8") === recorded, `${scenario}: the record of the primary was rewritten`);
   } else {
     t.assert(!existsSync(`${home}/state/extensions`), `${scenario}: a non-owner created ${home}/state/extensions`);
   }
@@ -499,7 +499,7 @@ await bridge.emit("session_start", { reason: "startup" }, ctx);
 const published = await t.waitFor(() => {
   const current = t.readCurrent(home);
   return current.state === "live" ? current : null;
-}, "the primary's own publication");
+}, "the primary to publish its own record");
 t.assert(published.piPid === process.pid && published.conversation === "main-conversation.jsonl", `the journal belongs to ${published.piPid} ${published.conversation}`);
 
 // Primary first: a nested session started now changes nothing either.
@@ -507,9 +507,9 @@ const before = readFileSync(`${t.journalDir(home)}/current.json`, "utf8");
 const names = t.journalNames(home).join(",");
 const second = await runNested();
 t.assert(second.code === 0 && second.output === "nested-ran", `nested session did not run cleanly: ${second.output}`);
-t.assert(readFileSync(`${t.journalDir(home)}/current.json`, "utf8") === before, "a nested session rewrote the primary's current.json");
-t.assert(t.journalNames(home).join(",") === names, "a nested session added files beside the primary's journal");
-t.assert(!t.allBytes(home).includes("NESTED_"), "nested conversation text reached the primary's journal");
+t.assert(readFileSync(`${t.journalDir(home)}/current.json`, "utf8") === before, "a nested session rewrote current.json of the primary");
+t.assert(t.journalNames(home).join(",") === names, "a nested session added files beside the journal of the primary");
+t.assert(!t.allBytes(home).includes("NESTED_"), "nested conversation text reached the journal of the primary");
 t.assertClean(bridge, "primary");
 console.log("ok");
 JS
@@ -892,7 +892,7 @@ const b1 = await t.waitFor(() => {
 }, "runtime B after reload");
 t.assert(b1.startedReason === "reload" && b1.previousGen === a1 && b1.conversation === "conv-x.jsonl", `reload record was ${JSON.stringify(b1)}`);
 
-// Runtime A's handlers stay registered in tests, as stale callbacks can in Pi.
+// The handlers of runtime A stay registered in tests, as stale callbacks can in Pi.
 await runtimeA.emit("agent_start", {}, ctxX);
 await runtimeA.emit("message_update", { message: t.assistantMessage([], { stopReason: "pending" }), assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "STALE_AFTER", partial: {} } }, ctxX);
 await runtimeA.emit("message_end", { message: t.assistantMessage([{ type: "text", text: "STALE_END" }]) }, ctxX);
@@ -904,7 +904,7 @@ t.assert(t.readJournal(home, a1).length === a1Records.length, "the stopped journ
 const afterStale = t.readCurrent(home);
 t.assert(afterStale.gen === b1.gen && afterStale.state === "live", "a stale runtime rewrote current.json");
 
-// Foreign files beside the journals are never the bridge's to remove.
+// Foreign files beside the journals are never for the bridge to remove.
 const foreign = ["notes.txt", `${"a".repeat(32)}.jsonl`, `${a1}.jsonl.bak`];
 for (const name of foreign) writeFileSync(`${t.journalDir(home)}/${name}`, "foreign\n");
 mkdirSync(`${t.journalDir(home)}/requests`);
@@ -1027,7 +1027,7 @@ t.assert(statSync(`${t.journalDir(home)}/${resync.gen}.jsonl`).size <= 8 * 1024 
 const opened = await t.waitFor(() => {
   const records = t.readJournal(home, rotated.gen);
   return records.length >= 2 ? records : null;
-}, "the rotated generation's first records");
+}, "the first records of the rotated generation");
 t.assert(opened[0].type === "snapshot" && opened[0].busy === true, "the rotated generation did not open with a busy snapshot");
 busy = false;
 await bridge.emit("agent_settled", { aborted: false }, ctx);
@@ -1118,7 +1118,7 @@ session.appendMessage(t.userMessage("OMP_PRIOR_CAPTAIN"));
 session.appendMessage(t.assistantMessage([{ type: "text", text: "OMP_PRIOR_ANSWER" }]));
 const bridge = await t.loadBridge(process.env.OMP_BRIDGE);
 const ctx = t.ompContext(session);
-// omp's session_start carries no reason.
+// The omp session_start carries no reason.
 await bridge.emit("session_start", {}, ctx);
 const first = await t.waitFor(() => t.readCurrent(home).state === "live" && t.readCurrent(home), "the omp primary to publish");
 const snapshot = t.readJournal(home, first.gen)[0];
@@ -1211,7 +1211,7 @@ const current = await t.waitFor(() => t.readCurrent(home).state === "live" && t.
 await primary.emit("agent_start", {}, pctx);
 await t.userTurn(primary, session, pctx, "PRIMARY_PROMPT");
 
-// omp's task tool binds the same extension afresh, in this same process, for
+// The omp task tool binds the same extension afresh, in this same process, for
 // a subagent session that has no UI.
 const sub = await t.loadBridge(process.env.OMP_BRIDGE);
 const subSession = t.createSession({ file: "/sessions/subagent.jsonl", id: "subagent" });
@@ -1235,7 +1235,7 @@ const records = await t.waitFor(() => {
   return all[all.length - 1].type === "run" && all[all.length - 1].state === "settled" ? all : null;
 }, "the primary run to settle");
 const after = t.readCurrent(home);
-t.assert(after.gen === current.gen && after.state === "live", `the subagent replaced the primary's record: ${JSON.stringify(after)}`);
+t.assert(after.gen === current.gen && after.state === "live", `the subagent replaced the record of the primary: ${JSON.stringify(after)}`);
 t.assert(JSON.stringify(t.journalNames(home)) === JSON.stringify([`${current.gen}.jsonl`, "current.json"].sort()), `unexpected files ${t.journalNames(home)}`);
 t.assert(!t.allBytes(home).includes("SUBAGENT"), "subagent text reached the journal");
 t.assert(records.some((r) => r.type === "message" && r.phase === "end" && r.text === "PRIMARY_ANSWER"), "the primary stopped journalling after the subagent ran");
@@ -1271,7 +1271,7 @@ const endA = t.assistantMessage([{ type: "text", text: "HEAD_TAIL" }], { timesta
 await bridge.emit("message_end", { message: endA }, ctx);
 session.appendMessage(endA);
 // omp hands message_update to extensions asynchronously, so an update can
-// trail its message's end, even into the next message's stream.
+// trail the end of its message, even into the stream of the next message.
 await delta(1000, "LATE_TAIL");
 await bridge.emit("message_start", { message: t.assistantMessage([], { stopReason: "pending", timestamp: 2000 }) }, ctx);
 await delta(1000, "STALE_FROM_A");
@@ -1323,7 +1323,7 @@ t.assert(JSON.stringify(snapshot.items.map((item) => [item.role, item.text])) ==
 await bridge.emit("agent_start", {}, ctx);
 await t.userTurn(bridge, session, ctx, "D_PROMPT");
 const reply = await t.assistantTurn(bridge, session, ctx, [{ type: "text", text: "D_REPLY" }]);
-// omp's own note to the model, as a user-role message, is the run's last entry.
+// A note omp itself adds for the model, as a user-role message, is the last entry of the run.
 const note = { ...t.userMessage("D_AGENT_NOTE_SECRET"), attribution: "agent" };
 await bridge.emit("message_start", { message: note }, ctx);
 await bridge.emit("message_end", { message: note }, ctx);
@@ -1338,7 +1338,7 @@ const records = await t.waitFor(() => {
   const all = t.readJournal(home, current.gen);
   return all.filter((r) => r.type === "run" && r.state === "settled").length === 2 ? all : null;
 }, "the second run to settle");
-t.assert(t.readCurrent(home).gen === current.gen, "omp's own note opened a new generation");
+t.assert(t.readCurrent(home).gen === current.gen, "a note omp itself added opened a new generation");
 t.assert(JSON.stringify(t.journalNames(home)) === JSON.stringify([`${current.gen}.jsonl`, "current.json"].sort()), `unexpected files ${t.journalNames(home)}`);
 const users = records.filter((r) => r.type === "message" && r.phase === "end" && r.role !== "assistant").map((r) => `${r.role}:${r.text ?? r.opKind ?? ""}`);
 t.assert(JSON.stringify(users) === JSON.stringify(["captain:D_PROMPT", "captain:D_NEXT"]), `user records were ${JSON.stringify(users)}`);
@@ -1378,8 +1378,8 @@ await bridge.emit("message_update", {
 }, ctx);
 await t.sleep(2000);
 t.assert(!existsSync(t.journalDir(home)), "fixture: the generation opened before the message ended");
-// omp may already have persisted the finished message when this extension's
-// message_end handler runs.
+// omp may already have persisted the finished message when the message_end
+// handler of this extension runs.
 const final = t.assistantMessage([{ type: "text", text: "E_FINAL_ANSWER" }], { timestamp: 5000 });
 session.appendMessage(final);
 await bridge.emit("message_end", { message: final }, ctx);
