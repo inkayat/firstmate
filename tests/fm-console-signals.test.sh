@@ -280,7 +280,7 @@ test_requires_explicit_home() {
   out=$(env -u FM_HOME "$SIGNALS" write 2>&1) && fail "write without FM_HOME must refuse"
   assert_contains "$out" "FM_HOME" "the refusal must name FM_HOME"
   rc=0
-  FM_HOME= "$SIGNALS" print >/dev/null 2>&1 || rc=$?
+  FM_HOME='' "$SIGNALS" print >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "print with an empty FM_HOME must refuse"
   assert_absent "$home/state/console-signals.json" "a refused run must write nothing"
   "$SIGNALS" --help | grep -q 'fm-console-signals.v1' || fail "--help must name the contract"
