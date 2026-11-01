@@ -435,7 +435,7 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
          [ {source:"backlog", reason:$reason}, {source:"status", reason:$reason} ]
        else
          (if $backlog_unread != "" then [ {source:"backlog", reason:("captain holds unknown: " + $backlog_unread)} ] else [] end)
-         + (if $sm == null or ($sm.registry.complete // true) == true then []
+         + (if $sm == null or ($sm.registry.complete == false | not) then []
             else [ {source:"secondmates", reason:("the secondmate registry was not read in full"
                      + (if ($sm.registry.reason // null) != null then ": " + $sm.registry.reason else "" end))} ] end)
          + (if ($sm.truncated // 0) > 0

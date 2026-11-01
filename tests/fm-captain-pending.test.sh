@@ -385,3 +385,14 @@ view=$(FM_SNAPSHOT_SECONDMATES=1 pending "$home" list --json) || fail "a bounded
 assert_contains "$(field "$view" '[.coverage.missing[].source] | join(",")')" "secondmates" \
   "secondmates beyond the snapshot bound are not disclosed"
 pass "an unread or truncated secondmate leaves the view incomplete instead of counting it as complete"
+
+home=$(make_home registry-truncated)
+printf '# fixture header one\n# fixture header two\n# fixture header three\n' > "$home/data/secondmates.md"
+view=$(FM_SNAPSHOT_REGISTRY_LINES=1 pending "$home" list --json) || fail "a home with a truncated secondmate registry could not be listed"
+assert_equals 'false|secondmates' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a secondmate registry read short of its end, with no registered secondmate, is published as complete"
+assert_contains "$(field "$view" '.coverage.missing[0].reason')" "not read in full" "the incomplete registry is not disclosed"
+view=$(pending "$home" list --json) || fail "a home with an untruncated empty secondmate registry could not be listed"
+assert_equals 'true|' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a fully read registry with no secondmate leaves the view complete"
+pass "an incompletely read secondmate registry leaves the view incomplete even with no registered secondmate"
