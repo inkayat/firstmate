@@ -19,6 +19,32 @@
 # cleaned of escape sequences and control characters; the file never exceeds
 # 64 KiB and is replaced by a temp-file rename inside state/.
 #
+# Additive keys, which a v1 reader ignores ("every key not listed is ignored"):
+#   counts             the view's exact per-bucket counts {live, needs_recheck,
+#                      deferred, blocked, parked, other, stale, total}
+#                      (bin/fm-captain-pending.sh owns the buckets); never
+#                      derived from questions[]. With coverage.complete false
+#                      they cover the ledger only.
+#   coverage           {complete, missing[], ledger_unreadable_lines}: missing
+#                      names "backlog" and "status" when the view's fleet
+#                      snapshot was unavailable.
+#   view_generated_at  when the view was computed; a reused view is older than
+#                      generated_at.
+#   requests[]         every open item of the view, compact: id (cut to 128
+#                      bytes), source, key (status decisions), bucket,
+#                      generation (null where none exists), subject (the first
+#                      line of its text, cut to 80 bytes), since; live first,
+#                      at most 64, and cut further only while the file would
+#                      pass 64 KiB.
+#   requests_omitted   counts.total minus the listed requests.
+#   questions[] items  also carry request_id, source, key (status decisions),
+#                      generation, text_truncated, and answer_to - the view's
+#                      reply reference, only when the text is whole.
+# The index never carries full text and is not a reply surface: a console
+# reads a request's whole text and generation on demand from
+# `bin/fm-captain-pending.sh list --json` by id, or answers a whole question
+# here, and replies with `bin/fm-inbox.sh note --answer-to <answer_to>`.
+#
 # Sources, all structured and read-only:
 #   - Questions and waiting: the one combined view of everything waiting on
 #     the captain, `bin/fm-captain-pending.sh list --json`

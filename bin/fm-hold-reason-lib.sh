@@ -9,6 +9,16 @@
 # base64-encoded UTF-8 text. Unmarked reasons are plain text. Readers decode only
 # the hold-reason field, once, and keep line breaks in quoted output strings.
 #
+# It also owns the one rule for a captain call's request GENERATION, the opaque
+# version a console binds a reply to:
+#   <hold-set stamp>#<recorded answer count>#<sha256 of title LF decoded reason>
+# The stamp and count change with every new lifecycle of the call; the digest
+# changes whenever the title or the decoded reason the captain is shown changes,
+# including an in-place re-hold that keeps the stamp. A stamp-less legacy hold has
+# an empty first part. bin/fm-fleet-snapshot.sh applies it once, in its one
+# backlog parser, so every reader - the combined view and the answer check -
+# sees the same value for the same row.
+#
 # Source this file; it defines functions only.
 
 # fm_hold_reason_encode <reason>: print the storable form, no trailing newline.
@@ -75,4 +85,37 @@ fm_hold_reason_decode_stream() {
       print $line;
     }
   ' "${1:-toon}"
+}
+
+# fm_hold_request_generations: on a backlog JSON document ({records:[...]}, hold
+# reasons already decoded) set every structured record's hold_generation to the
+# generation above when it is an open captain hold, and to null otherwise.
+fm_hold_request_generations() {
+  perl -MJSON::PP -MDigest::SHA=sha256_hex -MEncode=encode -e '
+    use strict;
+    use warnings;
+    binmode STDIN, ":encoding(UTF-8)";
+    binmode STDOUT, ":encoding(UTF-8)";
+    my $json = JSON::PP->new->allow_nonref;
+    local $/;
+    my $doc = $json->decode(<STDIN>);
+    for my $record (@{$doc->{records} || []}) {
+      next unless ref($record) eq "HASH" && $record->{structured};
+      my $kind = $record->{hold_kind};
+      my $reason = $record->{hold_reason};
+      my $state = $record->{state};
+      if (defined($kind) && $kind eq "captain" && defined($reason)
+          && !(defined($state) && $state eq "done")) {
+        my $title = defined($record->{title}) ? $record->{title} : $record->{id};
+        $title = "" unless defined $title;
+        my $stamp = defined($record->{hold_set}) ? $record->{hold_set} : "";
+        my $count = defined($record->{hold_resolutions}) ? $record->{hold_resolutions} : 0;
+        $record->{hold_generation} = $stamp . "#" . $count . "#"
+          . sha256_hex(encode("UTF-8", $title . "\n" . $reason));
+      } else {
+        $record->{hold_generation} = undef;
+      }
+    }
+    print $json->encode($doc), "\n";
+  '
 }

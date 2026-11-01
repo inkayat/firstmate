@@ -13,6 +13,7 @@ This document records the deterministic mechanism, structured surfaces, compatib
 | What is a captain call, and which subcommand does what? | [Mechanism](#mechanism) |
 | Why does cleanup of finished work leave a captain call open? | [Cleanup never closes a captain call](#cleanup-never-closes-a-captain-call) |
 | How does a keyed answer from chat or a board reach the call? | [Answer-time resolution](#answer-time-resolution) |
+| How does a console reply bind to one version of a call? | [Versioned answers](#versioned-answers) |
 | How is a call closed when it stopped being a question? | [Reconcile](#reconcile-re-check-reality-never-a-blind-close) |
 | Why did a decision card disappear from the board? | [Card hygiene](#card-hygiene-a-landed-subject-is-not-a-live-call) |
 | Where does a hold appear in snapshots and Bearings? | [Structured read surfaces](#structured-read-surfaces) |
@@ -86,8 +87,9 @@ The `answer` subcommand records the captain's exact words and resolves the call 
 | --- | --- |
 | `answer` | Closes a question-shaped call. |
 | `answer --release` | Frees a captain-gated work item to proceed without completing it. |
+| `answer --remaining-file <path>` | Records a partial answer and keeps the call held on the remaining questions. |
 
-It requires a non-empty captain decision file of at most 8192 bytes.
+It requires a non-empty captain decision of at most 8192 bytes, from a decision file or from a console answer note's body.
 It then works in this order:
 
 1. It durably writes a resolution block carrying the decision digest and a `Resolution mode:`.
@@ -109,6 +111,19 @@ It also verifies the task stays closed.
 
 A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held.
 An expired deferral therefore remains answerable.
+
+### Versioned answers
+
+A console reply answers one version of a call, so applying it must check that version first.
+Every open captain hold carries a request generation: its hold-set stamp, its recorded answer count, and a digest of its title and decoded reason.
+[`bin/fm-hold-reason-lib.sh`](../bin/fm-hold-reason-lib.sh) owns that rule, and the fleet snapshot's one backlog parser applies it, so the combined view and the answer check read the same value for the same row.
+The stamp and count separate lifecycles, and the digest catches an in-place re-hold that rewrites the question while keeping both; an identical re-hold keeps the generation.
+`answer --expect <generation>`, or `--note-ref <note-id>` for a console answer note, checks the generation under the same per-task control lock `hold` takes and refuses a changed, closed, or absent call without touching it.
+The applied or refused result is recorded on the answer note, and the resolution record names the generation and note, so an exact retry finishes an interrupted apply or re-records a lost outcome without a second resolution.
+A partial answer is one record plus an in-place reason rewrite under that lock; the call stays held, keeps its stamp, and gets a new generation.
+The lock serializes this script's writers only: a reason edited directly through tasks-axi is caught by any later check but can race the check-then-apply window.
+Ledger entries never change text, so an entry's id is its generation; keyed status decisions have no opening-event identity and therefore no generation and no console reply.
+[`bin/fm-captain-hold.sh --help`](../bin/fm-captain-hold.sh) owns the flags, refusals, and exit codes, and [`bin/fm-inbox.sh --help`](../bin/fm-inbox.sh) owns the answer note and its outcome.
 
 ### Recording a reviewed inventory (`complete`)
 
@@ -389,6 +404,13 @@ The durable deferral remains re-holding with `--until`.
 The fleet snapshot's secondmate-home summary classifies an actionable captain hold as `captain_decision`.
 It preserves every captain hold in the bounded queued inventory of the owning home.
 
+### Combined view and console counts
+
+`bin/fm-captain-pending.sh list --json` gives every item one `bucket` and counts each bucket exactly, beside the live count.
+An aged or date-expired captain hold is `needs_recheck`: it stays listed and counted, because aging decides only that it no longer counts as live, never that it was answered.
+The console signals file publishes those exact counts, its coverage, and a bounded index of every open request beside its four legacy questions, so no count depends on what fits on screen.
+[`bin/fm-captain-pending.sh --help`](../bin/fm-captain-pending.sh) owns the buckets and fields, and [`bin/fm-console-signals.sh --help`](../bin/fm-console-signals.sh) owns the published keys.
+
 ### Bearings placement
 
 `bin/fm-bearings-snapshot.sh` places each captain hold by its `hold_bucket` and inspects no prose of its own.
@@ -553,6 +575,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
+- Versioned answers apply only at their generation, refuse a superseded, closed, or absent call with the outcome on the note, keep a partially answered call held under a new generation, finish an interrupted apply on retry with one resolution, and apply once under concurrent replies (`tests/fm-captain-hold-lifecycle.test.sh`); the four-to-three console acceptance case lives in `tests/fm-console-signals.test.sh`.
 
 ### Legacy paths
 

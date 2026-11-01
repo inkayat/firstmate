@@ -426,6 +426,208 @@ test_hostile_hold_content() {
   pass "hostile hold ids, titles, and reasons are cut on rune boundaries and cleaned"
 }
 
+# --- exact counts, coverage, and the request index ---------------------------
+
+test_counts_coverage_and_request_index() {
+  local home pid rows i f doc detail note
+  home=$(make_home request-index)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  rows=
+  for i in 1 2 3 4 5 6; do
+    rows+=$(held_row "call-$i" "Call $i" "Question $i?" "$(utc_ago $((7000 - i * 60)))")$'\n'
+  done
+  rows+=$(held_row dated "Deferred call" "Later?" "$(utc_ago 60)" " (hold-until: 2099-01-01)")$'\n'
+  rows+=$(held_row blocked "Blocked call" "Blocked?" "$(utc_ago 60)" " (blocked-by: call-1)")$'\n'
+  rows+=$(held_row aged "Old call" "Old?" "2020-01-01T00:00:00Z")$'\n'
+  rows+="- [ ] parked-1 - Parked work (repo: sample) (since 2026-10-30) (hold: captain said stop) (hold-kind: parked)"$'\n'
+  write_backlog "$home" "$rows"
+  run_signals "$home" "" write || fail "write failed"
+  check "$f" "$home" "$pid" "request-index file"
+  doc=$(cat "$f")
+  assert_equals 'call-6,call-5,call-4,call-3|hold · call-6 (+2 more waiting)' \
+    "$(printf '%s' "$doc" | jq -r '"\([.questions[].id] | join(","))|\(.waiting.reason)"')" \
+    "the four legacy questions and the wait reason are unchanged"
+  assert_equals '6|1|1|1|1|0|0|10' \
+    "$(printf '%s' "$doc" | jq -r '.counts | "\(.live)|\(.needs_recheck)|\(.deferred)|\(.blocked)|\(.parked)|\(.other)|\(.stale)|\(.total)"')" \
+    "exact counts come from the source, not from the four questions"
+  assert_equals 'true||true' \
+    "$(printf '%s' "$doc" | jq -r '"\(.coverage.complete)|\(.coverage.missing | join(","))|\(.view_generated_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$"))"')" \
+    "a complete view says so and names when it was computed"
+  assert_equals '10|0|call-1,call-2,call-3,call-4,call-5,call-6|aged:needs_recheck,blocked:blocked,dated:deferred,parked-1:parked' \
+    "$(printf '%s' "$doc" | jq -r '"\(.requests | length)|\(.requests_omitted)|\([.requests[] | select(.bucket == "live") | .id] | sort | join(","))|\([.requests[] | select(.bucket != "live") | "\(.id):\(.bucket)"] | sort | join(","))"')" \
+    "every open request is indexed with its bucket, the oldest live calls included"
+  detail=$(run_pending "$home" list --json) || fail "the detail read failed"
+  assert_equals true "$(jq -n --argjson d "$detail" --argjson s "$doc" '
+      [$d.waiting_on_captain[], $d.paused_by_captain_order[], $d.paused_other_reason[]] as $items
+      | [ $s.requests[] as $r | (first($items[] | select(.id == $r.id)) | .generation) == $r.generation ] | all')" \
+    "each indexed generation is the one the on-demand detail read shows"
+  assert_equals 'Call 1: Question 1?|true' \
+    "$(printf '%s' "$detail" | jq -r 'first(.waiting_on_captain[] | select(.id == "call-1")) | "\(.text)|\(.reply.answer_to == "backlog:call-1@" + .generation)"')" \
+    "a call outside the four questions has its whole text and answer reference in the detail read"
+  assert_equals 'call-6|false|true' \
+    "$(printf '%s' "$doc" | jq -r '.questions[0] | "\(.request_id)|\(.text_truncated)|\(.answer_to == "backlog:call-6@" + .generation)"')" \
+    "a whole question carries its request id, generation, and answer reference"
+  assert_equals 'null' "$(printf '%s' "$doc" | jq -r '.requests[] | select(.id == "parked-1") | .generation')" \
+    "parked work has no generation"
+
+  # A call outside the four questions is answered from the detail read. (call-1
+  # would also unblock the blocked call, so answer call-2.)
+  note=$(answer_note "$home" oldest-2 \
+    "$(printf '%s' "$detail" | jq -r 'first(.waiting_on_captain[] | select(.id == "call-2")) | .reply.answer_to')" "Answer two.")
+  run_captain "$home" answer call-2 --note-ref "$note" >/dev/null || fail "an answer to a call outside the questions did not apply"
+  run_signals "$home" "" write || fail "write after the answer failed"
+  assert_equals '5|false' "$(jq -r '"\(.counts.live)|\([.requests[].id] | index("call-2") != null)"' "$f")" \
+    "the answered call outside the questions leaves the count and the index"
+  pass "exact counts, coverage, and an index of every open request are published beside the four questions"
+}
+
+run_inbox() {  # <home> <args...>
+  local home=$1
+  shift
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-inbox.sh" "$@"
+}
+
+answer_note() {  # <home> <reply-id> <answer-to> <words>: prints the note id
+  printf '%s' "$4" | run_inbox "$1" note --request-id "$2" --answer-to "$3" --json - | jq -r .id
+}
+
+live_now() {  # <home>: the published live count and the view's own, joined
+  run_signals "$1" "" write || fail "write failed"
+  printf '%s|%s' "$(jq -r .counts.live "$1/state/console-signals.json")" \
+    "$(run_pending "$1" list --json | jq -r .counts.live)"
+}
+
+# The captain's acceptance case: four requests genuinely wait; sending,
+# announcing, or handling a reply changes nothing; fully applying one through
+# its owner leaves exactly three, for good.
+test_answering_one_of_four_waiting_requests_leaves_three() {
+  local home pid f detail gen note other out
+  home=$(make_home four-to-three)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  run_captain "$home" hold route-q --title "Route" --reason "North or south?" --repo sample >/dev/null || fail "hold failed"
+  run_captain "$home" hold size-q --title "Size" --reason $'Small (S) or large (L)?\nPick one.' --repo sample >/dev/null || fail "hold failed"
+  run_captain "$home" hold date-q --title "Date" --reason "Friday or Monday?" --repo sample >/dev/null || fail "hold failed"
+  run_pending "$home" add --kind approval -- "Approve the release notes" >/dev/null || fail "add failed"
+  assert_equals '4|4' "$(live_now "$home")" "four requests wait"
+  check "$f" "$home" "$pid" "four-request file"
+
+  detail=$(run_pending "$home" list --json) || fail "the detail read failed"
+  gen=$(printf '%s' "$detail" | jq -r 'first(.waiting_on_captain[] | select(.id == "size-q")) | .generation')
+  note=$(answer_note "$home" reply-size "backlog:size-q@$gen" "Large (L).")
+  assert_equals '4|4' "$(live_now "$home")" "a sent and announced reply changes no count"
+  if run_inbox "$home" drain --ack "$note" >/dev/null 2>&1; then
+    fail "a reply was marked handled without being applied or answered"
+  fi
+  other=$(answer_note "$home" reply-date "backlog:date-q@$(printf '%s' "$detail" | jq -r 'first(.waiting_on_captain[] | select(.id == "date-q")) | .generation')" "Hmm.")
+  run_inbox "$home" reply "$other" "That does not answer Friday or Monday; please pick one." >/dev/null || fail "reply failed"
+  run_inbox "$home" drain --ack "$other" >/dev/null || fail "a replied note could not be marked handled"
+  assert_equals '4|4' "$(live_now "$home")" "a reply handled without being applied changes no count"
+
+  out=$(run_captain "$home" answer size-q --note-ref "$note") || fail "applying the exact current reply failed"
+  assert_equals "answered: size-q" "$out" "the reply was not applied as an answer"
+  assert_contains "$(cd "$home" && tasks-axi show size-q --full --file data/backlog.md)" "state: done" \
+    "the canonical call was not closed"
+  assert_equals "answered|$gen" \
+    "$(run_inbox "$home" show --json "$note" | jq -r '"\(.outcome.outcome)|\(.outcome.generation_seen)"')" \
+    "the outcome correlated to the answered version is not on the note"
+  assert_equals '3|3' "$(live_now "$home")" "answering one of four leaves three"
+  assert_equals 'false|false' \
+    "$(jq -r '"\([.requests[].id] | index("size-q") != null)|\([.questions[].request_id] | index("size-q") != null)"' "$f")" \
+    "the answered call is still published"
+
+  [ "$(printf 'Large (L).' | run_inbox "$home" note --request-id reply-size --answer-to "backlog:size-q@$gen" --json - | jq -r '"\(.outcome)|\(.id)"')" = "replay|$note" ] \
+    || fail "the resent reply was not the same note"
+  run_captain "$home" answer size-q --note-ref "$note" >/dev/null || fail "the replayed apply was not idempotent"
+  assert_equals 1 "$(cd "$home" && tasks-axi show size-q --full --file data/backlog.md | grep -o 'Resolution recorded by fm-captain-hold' | wc -l | tr -d ' ')" \
+    "the replay recorded a second resolution"
+  assert_equals '3|3' "$(live_now "$home")" "a replayed reply resurrected or removed a request"
+  run_inbox "$home" drain --ack "$note" >/dev/null || fail "the applied note could not be marked handled"
+  assert_equals '3|3' "$(live_now "$home")" "handling the applied note changed the count"
+  pass "four waiting requests become exactly three when one reply is applied through its owner, and stay three"
+}
+
+test_partial_answer_keeps_all_four_waiting() {
+  local home pid f gen note after
+  home=$(make_home partial-four)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  run_captain "$home" hold plan-q --title "Plan" --reason $'Q1: scope?\nQ2: owner?' --repo sample >/dev/null || fail "hold failed"
+  run_captain "$home" hold route-q --title "Route" --reason "North or south?" --repo sample >/dev/null || fail "hold failed"
+  run_captain "$home" hold date-q --title "Date" --reason "Friday or Monday?" --repo sample >/dev/null || fail "hold failed"
+  run_pending "$home" add --kind approval -- "Approve the release notes" >/dev/null || fail "add failed"
+  assert_equals '4|4' "$(live_now "$home")" "four requests wait"
+  gen=$(run_pending "$home" list --json | jq -r 'first(.waiting_on_captain[] | select(.id == "plan-q")) | .generation')
+  note=$(answer_note "$home" reply-plan "backlog:plan-q@$gen" "Q1: the small scope.")
+  printf 'Q2: owner?\n' > "$home/remaining.txt"
+  run_captain "$home" answer plan-q --note-ref "$note" --remaining-file "$home/remaining.txt" >/dev/null \
+    || fail "the partial answer failed"
+  assert_equals '4|4' "$(live_now "$home")" "a partial answer must leave all four waiting"
+  after=$(jq -r '.requests[] | select(.id == "plan-q") | .generation' "$f")
+  assert_not_equals "$gen" "$after" "the partially answered request kept its old version"
+  assert_equals 'Plan: Q2: owner?' "$(jq -r '.requests[] | select(.id == "plan-q") | .subject' "$f")" \
+    "the partially answered request does not show only its remaining question"
+  assert_equals "partial|$after" "$(run_inbox "$home" show --json "$note" | jq -r '"\(.outcome.outcome)|\(.outcome.generation_after)"')" \
+    "the partial outcome does not name the new version"
+  pass "a partial answer keeps the request waiting under a new version with only its remaining questions"
+}
+
+test_cut_question_is_answered_only_from_the_whole_text() {
+  local home pid f doc detail
+  home=$(make_home cut-question)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  write_backlog "$home" "$(held_row long-q "Long call" "$(printf 'x%.0s' $(seq 1 3000))" "$(utc_ago 30)")"$'\n'"$(held_row short-q "Short call" "Yes or no?" "$(utc_ago 60)")"$'\n'
+  run_signals "$home" "" write || fail "write failed"
+  check "$f" "$home" "$pid" "cut-question file"
+  doc=$(cat "$f")
+  assert_equals 'long-q|true|false' "$(printf '%s' "$doc" | jq -r '.questions[0] | "\(.request_id)|\(.text_truncated)|\(has("answer_to"))"')" \
+    "a cut question is marked and offers no answer reference"
+  assert_equals 'short-q|false|true' "$(printf '%s' "$doc" | jq -r '.questions[1] | "\(.request_id)|\(.text_truncated)|\(has("answer_to"))"')" \
+    "a whole question offers its answer reference"
+  detail=$(run_pending "$home" list --json) || fail "the detail read failed"
+  assert_equals '3011|true' \
+    "$(printf '%s' "$detail" | jq -r 'first(.waiting_on_captain[] | select(.id == "long-q")) | "\(.text | length)|\(.reply.answer_to == "backlog:long-q@" + .generation)"')" \
+    "the detail read gives the cut question whole, with its answer reference"
+  pass "a cut question is answered only after its whole text is read from the detail read"
+}
+
+test_request_index_is_bounded() {
+  local home pid lister rows i list f quotes
+  home=$(make_home request-bound)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  lister="$TMP_ROOT/request-bound-config"
+  make_lister "$lister"
+  list='['
+  for i in $(seq -w 1 32); do
+    [ "$i" = 01 ] || list+=','
+    list+="{\"name\":\"bot-$i\",\"state\":\"active\",\"project\":\"$(printf 'p%.0s' $(seq 1 100))\",\"schedule\":\"daily 09:00-10:00 Europe/Stockholm\",\"next\":\"2026-11-01 09:00 CET\",\"last_run\":\"none\"}"
+    printf '{"name":"bot-%s","state":"active","project":"%s","days":"daily","at":"09:00","until":"10:00","scope":"%s","next":"2026-11-01 09:00 CET","last_run":"none"}' \
+      "$i" "$(printf 'p%.0s' $(seq 1 100))" "$(printf 'ş%.0s' $(seq 1 300))" > "$lister/fixture/show-bot-$i.json"
+  done
+  printf '%s]\n' "$list" > "$lister/fixture/list.json"
+  # Quotes double in JSON, so these 100 live calls overflow 64 KiB unless the
+  # index is cut further than its 64-entry bound.
+  quotes=$(printf '"%.0s' $(seq 1 200))
+  rows=
+  for i in $(seq -w 1 100); do
+    rows+=$(held_row "${quotes:0:100}-$i" "$quotes" "$quotes$quotes$quotes$quotes$quotes$quotes$quotes$quotes$quotes$quotes$quotes$quotes" "$(utc_ago $((200 - 10#$i)))")$'\n'
+  done
+  write_backlog "$home" "$rows"
+  run_signals "$home" "$lister" write 2>/dev/null || fail "write failed with 100 live calls"
+  check "$f" "$home" "$pid" "bounded request index"
+  assert_equals '100|100|4|32|true' \
+    "$(jq -r '"\(.counts.live)|\((.requests | length) + .requests_omitted)|\(.questions | length)|\(.bots | length)|\(([.requests[].id] | unique | length) == (.requests | length))"' "$f")" \
+    "the exact total survives the bound, and listed plus omitted requests equal it"
+  assert_equals true "$(jq -r '(.requests | length) > 0 and (.requests | length) < 64' "$f")" \
+    "the index is cut below its 64-entry bound so the file stays within 64 KiB"
+  assert_equals 'true|false' "$(jq -r '"\([.questions[].text_truncated] | all)|\([.questions[] | has("answer_to")] | any)"' "$f")" \
+    "a cut question text is marked and offers no answer reference"
+  pass "a hundred open requests keep an exact count while the index is bounded with its omissions counted"
+}
+
 # --- the captain-pending ledger ---------------------------------------------
 
 test_ledger_entries_of_each_kind() {
@@ -570,6 +772,9 @@ test_unavailable_snapshot_and_cache() {
   check "$f" "$home" "$pid" "partial file"
   assert_equals 'cp-1|question (holds and status decisions unreadable)' "$(qs "$f" .id)|$(jq -r .waiting.reason "$f")" \
     "only the ledger entry is published, and the wait names what is missing"
+  assert_equals 'false|backlog,status|1|1' \
+    "$(jq -r '"\(.coverage.complete)|\(.coverage.missing | join(","))|\(.counts.live)|\(.requests | length)"' "$f")" \
+    "an incomplete view says which sources are missing and never publishes a zero count for them"
 
   # A complete view is cached again, and expires: once it is old, the
   # snapshot is consulted even though nothing changed.
@@ -678,8 +883,10 @@ test_atomic_fresh_and_contained() {
   run_signals "$home" "" write || fail "second write failed"
   second=$(jq -r .generated_at "$home/state/console-signals.json")
   [ "$second" \> "$first" ] || fail "a rewrite must refresh generated_at ($first -> $second)"
-  assert_equals "$(jq -S 'del(.generated_at)' <<<"$(run_signals "$home" "" print)")" \
-    "$(jq -S 'del(.generated_at)' "$home/state/console-signals.json")" "print shows what write publishes"
+  # Both times may differ: write reuses a recent cached view and says when it
+  # was computed, while print always computes it anew.
+  assert_equals "$(jq -S 'del(.generated_at, .view_generated_at)' <<<"$(run_signals "$home" "" print)")" \
+    "$(jq -S 'del(.generated_at, .view_generated_at)' "$home/state/console-signals.json")" "print shows what write publishes"
 
   # Readers never see a partial file while writes repeat.
   ( for i in $(seq 1 12); do run_signals "$home" "" write 2>/dev/null; done ) &
@@ -784,5 +991,10 @@ test_bots_from_lister
 test_bot_cap_and_missing_lister
 test_atomic_fresh_and_contained
 test_watcher_publishes_only_when_opted_in
+test_counts_coverage_and_request_index
+test_request_index_is_bounded
+test_answering_one_of_four_waiting_requests_leaves_three
+test_partial_answer_keeps_all_four_waiting
+test_cut_question_is_answered_only_from_the_whole_text
 
 echo '# all fm-console-signals tests passed'

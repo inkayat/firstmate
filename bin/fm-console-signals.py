@@ -45,6 +45,13 @@ PENDING_SCHEMA = "fm-captain-pending-list.v1"
 PENDING_SECTIONS = ("waiting_on_captain", "paused_by_captain_order", "paused_other_reason")
 PENDING_CACHE = ".console-signals-pending.json"
 PENDING_MAX_AGE = 60
+REQUESTS_MAX = 64
+REQUEST_ID_MAX = 128
+GENERATION = re.compile(r"[A-Za-z0-9:#._-]{1,200}\Z")
+REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
+# Bucket order of the request index: what the captain can act on first.
+BUCKETS = ("live", "needs_recheck", "deferred", "blocked", "stale", "parked", "other")
+COUNT_KEYS = ("live", "needs_recheck", "deferred", "blocked", "parked", "other", "stale", "total")
 
 # CSI (7- and 8-bit), OSC, DCS/SOS/PM/APC strings, and two-byte ESC sequences.
 ESCAPES = re.compile(
@@ -187,7 +194,9 @@ def cached_view(cache: str, fingerprint: list) -> dict | None:
         with open(cache, encoding="utf-8") as f:
             cached = json.load(f)
         view = cached.get("view")
-        if cached.get("fingerprint") == fingerprint and view.get("schema") == PENDING_SCHEMA:
+        # A view cached by an older engine lacks the exact counts; read anew.
+        if cached.get("fingerprint") == fingerprint and view.get("schema") == PENDING_SCHEMA \
+                and all(k in (view.get("counts") or {}) for k in COUNT_KEYS):
             return view
     except (OSError, ValueError, AttributeError):
         pass
@@ -225,6 +234,21 @@ def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
     return view, complete
 
 
+def reply_reference(item: dict) -> tuple:
+    """(generation, answer_to) of a view item: its generation when well formed,
+    and its inbox-note reference only when the view offers one for exactly
+    this source, canonical id, and generation."""
+    gen = item.get("generation")
+    gen = gen if isinstance(gen, str) and GENERATION.match(gen) else None
+    reply = item.get("reply")
+    ref = reply.get("answer_to") if isinstance(reply, dict) else None
+    rid = item.get("id")
+    if not (gen and isinstance(rid, str) and REQUEST_ID.match(rid)
+            and ref == "%s:%s@%s" % (item.get("source"), rid, gen)):
+        ref = None
+    return gen, ref
+
+
 def questions_from(view: dict) -> tuple:
     """(questions, live items left out) from the view's live items."""
     live = [i for section in PENDING_SECTIONS for i in (view.get(section) or [])
@@ -254,7 +278,61 @@ def questions_from(view: dict) -> tuple:
         created = i.get("created")
         if isinstance(created, str) and FULL_TIME.match(created):
             q["since"] = created
+        # Additive keys: which request this is, its version, and whether the
+        # text above is whole; only a whole text may be answered from here.
+        gen, ref = reply_reference(i)
+        truncated = len(clean(i.get("text"), True).encode("utf-8")) > TEXT_MAX
+        q["request_id"] = text(i.get("id"), REQUEST_ID_MAX)
+        q["source"] = i.get("source") if i.get("source") in ("ledger", "backlog", "status") else "unknown"
+        if q["source"] == "status" and isinstance(i.get("key"), str):
+            q["key"] = text(i["key"], REQUEST_ID_MAX)
+        q["generation"] = gen
+        q["text_truncated"] = truncated
+        if ref and not truncated:
+            q["answer_to"] = ref
         questions.append(q)
+    return questions, len(live) - len(questions)
+
+
+def view_items(view: dict) -> list:
+    return [i for section in PENDING_SECTIONS for i in (view.get(section) or []) if isinstance(i, dict)]
+
+
+def requests_from(view: dict) -> list:
+    """Every open item of the view, compact, ordered by bucket (live first)
+    and otherwise as the view lists them; the caller bounds it."""
+    rank = {b: n for n, b in enumerate(BUCKETS)}
+    items = sorted(view_items(view), key=lambda i: rank.get(i.get("bucket"), len(BUCKETS)))
+    out = []
+    for i in items:
+        rid = text(i.get("id"), REQUEST_ID_MAX)
+        if not rid:
+            continue
+        gen, _ = reply_reference(i)
+        r = {"id": rid,
+             "source": i.get("source") if i.get("source") in ("ledger", "backlog", "status") else "unknown",
+             "bucket": i.get("bucket") if i.get("bucket") in BUCKETS else "other",
+             "generation": gen}
+        if r["source"] == "status" and isinstance(i.get("key"), str):
+            r["key"] = text(i["key"], REQUEST_ID_MAX)
+        first_line = clean(i.get("text"), True).split("\n", 1)[0]
+        r["subject"] = cut(first_line, TOPIC_MAX)
+        created = i.get("created")
+        if isinstance(created, str) and FULL_TIME.match(created):
+            r["since"] = created
+        out.append(r)
+    return out
+
+
+def counts_from(view: dict) -> dict:
+    counts = view.get("counts") or {}
+    out = {}
+    for key in COUNT_KEYS:
+        value = counts.get(key)
+        if type(value) is not int or value < 0:
+            raise ValueError("the captain-pending view has no exact %s count" % key)
+        out[key] = value
+    return out
     return questions, len(live) - len(questions)
 
 
@@ -389,6 +467,10 @@ def assemble(args: argparse.Namespace, use_cache: bool) -> bytes:
     if not complete and not questions:
         raise ValueError("captain holds and status decisions unreadable and no ledger entry is open; "
                          "nothing reliable to publish")
+    counts = counts_from(view)
+    requests = requests_from(view)
+    listed = requests[:REQUESTS_MAX]
+    generated = view.get("generated")
     doc = {
         "schema": SCHEMA,
         "home": args.home,
@@ -397,8 +479,23 @@ def assemble(args: argparse.Namespace, use_cache: bool) -> bytes:
         "waiting": waiting_from(questions, left_out, complete),
         "questions": questions,
         "bots": bots_from(args.bot_bin, args.home, args.code_root, args.timeout),
+        # Additive keys: exact counts from the source, what the view could not
+        # read, when it was computed, and every open request, bounded.
+        "counts": counts,
+        "coverage": {"complete": complete,
+                     "missing": [] if complete else ["backlog", "status"],
+                     "ledger_unreadable_lines": unreadable if isinstance(unreadable, int) else 0},
+        "view_generated_at": generated if isinstance(generated, str) and FULL_TIME.match(generated) else None,
+        "requests": listed,
+        "requests_omitted": counts["total"] - len(listed),
     }
     data = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    # The index yields room before anything else does: drop its last entries
+    # (the least actionable) and count them as omitted until the file fits.
+    while len(data) > FILE_MAX and doc["requests"]:
+        doc["requests"].pop()
+        doc["requests_omitted"] += 1
+        data = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     if len(data) > FILE_MAX:
         raise ValueError("document is %d bytes, over the %d-byte cap" % (len(data), FILE_MAX))
     return data

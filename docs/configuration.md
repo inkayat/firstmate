@@ -110,7 +110,7 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-- Captain inbox notes under `state/inbox/`, with their handled copies, replies, and the log of wake acknowledgements that named a still-pending note, `state/inbox/.ack-overrides.log` (`bin/fm-inbox.sh`, `bin/fm-wake-drain.sh`).
+- Captain inbox notes under `state/inbox/`, with their handled copies, replies, answer outcomes, and the log of wake acknowledgements that named a still-pending note, `state/inbox/.ack-overrides.log` (`bin/fm-inbox.sh`, `bin/fm-wake-drain.sh`).
 - The opt-in console-signals file `state/console-signals.json`, its last complete captain-pending view `state/.console-signals-pending.json`, and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
 - The opt-in console submit channel `state/console-submit/`: queued and in-flight console messages, their receipts, and the delivering omp process's `consumer.json` ([console-submit.md](console-submit.md)).
 
@@ -859,6 +859,8 @@ While the flag exists, the watcher runs `bin/fm-console-signals.sh write` detach
 The questions and the wait come only from the [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl)'s combined view, `bin/fm-captain-pending.sh list --json`, so chat-only ledger entries appear beside live captain holds and live status decisions; the bots come only from the bot code's own `fm-bot list` and `show` output; neither reads chat or status prose.
 When that view's fleet snapshot is unavailable, only open ledger entries are published, marked incomplete, and with none open the previous file is left to age rather than claiming that nothing waits.
 A complete view is reused for up to 60 seconds while the files it reads are unchanged, which keeps an idle fleet from running it every poll.
+Beside the four questions the file carries additive keys an older console ignores: exact per-bucket counts from the view, its coverage, when the view was computed, and a bounded index of every open request with its generation, so no count is ever read off the questions shown.
+A console answers a request with an inbox answer note bound to that generation (`bin/fm-inbox.sh note --answer-to`), and only firstmate's apply command changes the request and records the outcome on the note; [`docs/captain-hold-lifecycle.md`](captain-hold-lifecycle.md#versioned-answers) explains the mechanism.
 The file is written only while the home's session lock is held, carries that lock's pid, and is removed when the lock is free or stale.
 Publishing adds no model call, no network access, and no long-lived process: each run is one short local process the watcher never waits for, and a slow or failing run only leaves the previous file to age and its reasons in `state/.console-signals.log`.
 
@@ -1100,8 +1102,8 @@ Every event carries `v` (always `1`), `event`, `id`, `at` (UTC ISO-8601), and `e
 | Event | Additional fields | Effect |
 | --- | --- | --- |
 | `add` | `seq` (integer), `kind` (`question`, `approval`, `command`, `task`, or `other`), `text`, and nullable `task`, `key`, and `due` (`YYYY-MM-DD`) | Creates open entry `cp-<seq>`. |
-| `answer` | nullable `note` (the captain's answer) | Marks an open entry `answered`. |
-| `drop` | nullable `note` (why it no longer needs the captain) | Marks an open entry `dropped`. |
+| `answer` | nullable `note` (the captain's answer); `note_ref` when a console answer note closed it | Marks an open entry `answered`. |
+| `drop` | nullable `note` (why it no longer needs the captain); `note_ref` when a console answer note closed it | Marks an open entry `dropped`. |
 
 An entry is `open` until its first `answer` or `drop`; later close events for the same id are ignored.
 Readers skip and count lines that are not well-formed version-1 records, so a line torn by a crash never hides the rest of the ledger.
