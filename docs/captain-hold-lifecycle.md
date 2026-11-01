@@ -409,6 +409,7 @@ It preserves every captain hold in the bounded queued inventory of the owning ho
 `bin/fm-captain-pending.sh list --json` gives every item one `bucket` and counts each bucket exactly, beside the live count.
 An aged or date-expired captain hold is `needs_recheck`: it stays listed and counted, because aging decides only that it no longer counts as live, never that it was answered.
 The console signals file publishes those exact counts, its coverage, and a bounded index of every open request beside its four legacy questions, so no count depends on what fits on screen.
+The view's `coverage` names every source it could not read in full - an unavailable snapshot, a backlog backend other than the markdown file the snapshot parses, or a secondmate summary that was unreadable, cut, or beyond the snapshot bound - so an unread source is never published as a complete or zero count.
 [`bin/fm-captain-pending.sh --help`](../bin/fm-captain-pending.sh) owns the buckets and fields, and [`bin/fm-console-signals.sh --help`](../bin/fm-console-signals.sh) owns the published keys.
 
 ### Bearings placement

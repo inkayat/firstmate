@@ -47,6 +47,7 @@ PENDING_CACHE = ".console-signals-pending.json"
 PENDING_MAX_AGE = 60
 REQUESTS_MAX = 64
 REQUEST_ID_MAX = 128
+MISSING_MAX = 16
 GENERATION = re.compile(r"[A-Za-z0-9:#._-]{1,200}\Z")
 REQUEST_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 # Bucket order of the request index: what the captain can act on first.
@@ -194,9 +195,11 @@ def cached_view(cache: str, fingerprint: list) -> dict | None:
         with open(cache, encoding="utf-8") as f:
             cached = json.load(f)
         view = cached.get("view")
-        # A view cached by an older engine lacks the exact counts; read anew.
+        # A view cached by an older engine lacks the exact counts or its
+        # coverage; read anew.
         if cached.get("fingerprint") == fingerprint and view.get("schema") == PENDING_SCHEMA \
-                and all(k in (view.get("counts") or {}) for k in COUNT_KEYS):
+                and all(k in (view.get("counts") or {}) for k in COUNT_KEYS) \
+                and (view.get("coverage") or {}).get("complete") is True:
             return view
     except (OSError, ValueError, AttributeError):
         pass
@@ -205,10 +208,11 @@ def cached_view(cache: str, fingerprint: list) -> dict | None:
 
 def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
     """(view, complete) from `fm-captain-pending.sh list --json`, or None.
-    complete is False when its fleet snapshot was unavailable (exit 3): the
-    view then holds the ledger alone. With use_cache, a complete view is kept
-    in state/ and reused for up to PENDING_MAX_AGE seconds while the
-    fingerprint of what it reads is unchanged."""
+    complete is False when the view did not read every source: its fleet
+    snapshot was unavailable (exit 3), when the view then holds the ledger
+    alone, or its coverage names a source it could not read. With use_cache,
+    a complete view is kept in state/ and reused for up to PENDING_MAX_AGE
+    seconds while the fingerprint of what it reads is unchanged."""
     cache = os.path.join(args.home, "state", PENDING_CACHE)
     fingerprint = pending_fingerprint(args.home)
     if use_cache:
@@ -224,7 +228,8 @@ def pending_view(args: argparse.Namespace, use_cache: bool) -> tuple:
     if not isinstance(view, dict) or view.get("schema") != PENDING_SCHEMA:
         diag("captain-pending view unreadable: " + (err.strip().splitlines() or ["exit %s" % rc])[-1])
         return None
-    complete = rc == 0 and (view.get("fleet") or {}).get("available") is True
+    complete = rc == 0 and (view.get("fleet") or {}).get("available") is True \
+        and (view.get("coverage") or {}).get("complete") is True
     if complete and use_cache:
         try:
             publish_file(os.path.dirname(cache), PENDING_CACHE,
@@ -333,15 +338,50 @@ def counts_from(view: dict) -> dict:
             raise ValueError("the captain-pending view has no exact %s count" % key)
         out[key] = value
     return out
-    return questions, len(live) - len(questions)
 
 
-def waiting_from(questions: list, left_out: int, complete: bool) -> dict:
+def coverage_from(view: dict, complete: bool) -> dict:
+    """The view's coverage, bounded: missing names each source it could not
+    read (backlog, status, secondmates, secondmate:<id>), once, and
+    missing_reasons says why."""
+    entries = [m for m in ((view.get("coverage") or {}).get("missing") or []) if isinstance(m, dict)]
+    if not complete and not entries:
+        entries = [{"source": "backlog", "reason": "not read"}, {"source": "status", "reason": "not read"}]
+    missing, reasons = [], []
+    for m in entries:
+        source = text(m.get("source"), REQUEST_ID_MAX) or "unknown"
+        if source not in missing:
+            missing.append(source)
+        reasons.append({"source": source, "reason": text(m.get("reason"), REASON_MAX) or "not read"})
+    unreadable = (view.get("ledger") or {}).get("unreadable_lines")
+    return {"complete": complete,
+            "missing": missing[:MISSING_MAX],
+            "missing_reasons": reasons[:MISSING_MAX],
+            "missing_omitted": max(len(missing) - MISSING_MAX, 0),
+            "ledger_unreadable_lines": unreadable if isinstance(unreadable, int) else 0}
+
+
+def coverage_notes(missing: list) -> list:
+    """What the wait reason says is unread, so prose never claims a whole list."""
+    notes = []
+    if "backlog" in missing and "status" in missing:
+        notes.append("holds and status decisions unreadable")
+    elif "backlog" in missing:
+        notes.append("captain holds unreadable")
+    elif "status" in missing:
+        notes.append("status decisions unreadable")
+    if any(m == "secondmates" or m.startswith("secondmate:") for m in missing):
+        notes.append("secondmate calls unreadable")
+    if any(m not in ("backlog", "status", "secondmates") and not m.startswith("secondmate:") for m in missing):
+        notes.append("some sources unreadable")
+    return notes
+
+
+def waiting_from(questions: list, left_out: int, unread: list) -> dict:
     if not questions:
         return {"state": "none"}
     first = questions[0]
-    notes = (["+%d more waiting" % left_out] if left_out else []) + \
-        ([] if complete else ["holds and status decisions unreadable"])
+    notes = (["+%d more waiting" % left_out] if left_out else []) + unread
     reason = first.get("topic") or clean(first["text"], False)
     if notes:
         reason += " (%s)" % "; ".join(notes)
@@ -464,9 +504,13 @@ def assemble(args: argparse.Namespace, use_cache: bool) -> bytes:
     if isinstance(unreadable, int) and unreadable > 0:
         diag("%d unreadable captain-pending ledger line(s) skipped" % unreadable)
     questions, left_out = questions_from(view)
+    coverage = coverage_from(view, complete)
+    unread = [] if complete else coverage_notes(coverage["missing"])
     if not complete and not questions:
-        raise ValueError("captain holds and status decisions unreadable and no ledger entry is open; "
-                         "nothing reliable to publish")
+        # With no readable item waiting, a document would say nothing waits:
+        # publish nothing, so the previous file ages instead.
+        raise ValueError("%s unreadable and nothing readable waits; nothing reliable to publish"
+                         % ", ".join(coverage["missing"]))
     counts = counts_from(view)
     requests = requests_from(view)
     listed = requests[:REQUESTS_MAX]
@@ -476,15 +520,13 @@ def assemble(args: argparse.Namespace, use_cache: bool) -> bytes:
         "home": args.home,
         "lock_pid": int(args.lock_pid),
         "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "waiting": waiting_from(questions, left_out, complete),
+        "waiting": waiting_from(questions, left_out, unread),
         "questions": questions,
         "bots": bots_from(args.bot_bin, args.home, args.code_root, args.timeout),
         # Additive keys: exact counts from the source, what the view could not
         # read, when it was computed, and every open request, bounded.
         "counts": counts,
-        "coverage": {"complete": complete,
-                     "missing": [] if complete else ["backlog", "status"],
-                     "ledger_unreadable_lines": unreadable if isinstance(unreadable, int) else 0},
+        "coverage": coverage,
         "view_generated_at": generated if isinstance(generated, str) and FULL_TIME.match(generated) else None,
         "requests": listed,
         "requests_omitted": counts["total"] - len(listed),

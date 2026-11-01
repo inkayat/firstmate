@@ -593,6 +593,42 @@ test_cut_question_is_answered_only_from_the_whole_text() {
   pass "a cut question is answered only after its whole text is read from the detail read"
 }
 
+# A source the view cannot read is never published as complete or as zero.
+test_unread_sources_never_publish_a_complete_count() {
+  local home pid f rc mate
+  home=$(make_home unread-backend)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  printf 'backend = "beads"\n' > "$home/.tasks.toml"
+  write_backlog "$home" "$(held_row stale-call "Stale markdown call" "Pick one?" "$(utc_ago 60)")"$'\n'
+  rc=0
+  run_signals "$home" "" write 2>/dev/null || rc=$?
+  assert_not_equals 0 "$rc" "an unread backlog backend with nothing else waiting must not publish nothing-waits"
+  assert_absent "$f" "a file was published claiming nothing waits"
+  run_pending "$home" add --kind question -- "Chat ask" >/dev/null || fail "add failed"
+  run_signals "$home" "" write || fail "write with an open ledger entry failed"
+  check "$f" "$home" "$pid" "unread-backend file"
+  assert_equals 'false|backlog|1|cp-1|question (captain holds unreadable)' \
+    "$(jq -r '"\(.coverage.complete)|\(.coverage.missing | join(","))|\(.counts.total)|\([.requests[].id] | join(","))|\(.waiting.reason)"' "$f")" \
+    "captain holds of an unread backend are published as unknown, and a stale markdown row never stands in"
+
+  home=$(make_home unread-secondmate)
+  hold_lock "$home"; pid=$LOCK_PID
+  f="$home/state/console-signals.json"
+  mate="$TMP_ROOT/unread-mate"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# fixture\n' > "$mate/AGENTS.md"
+  printf 'unread-mate\n' > "$mate/.fm-secondmate-home"
+  printf -- '- unread-mate - fixture (home: %s; scope: fixture; projects: sample; added 2026-10-30)\n' "$mate" > "$home/data/secondmates.md"
+  run_pending "$home" add --kind question -- "Chat ask" >/dev/null || fail "add failed"
+  run_signals "$home" "" write || fail "write with an unread secondmate failed"
+  check "$f" "$home" "$pid" "unread-secondmate file"
+  assert_equals 'false|secondmate:unread-mate|true|question (secondmate calls unreadable)' \
+    "$(jq -r '"\(.coverage.complete)|\(.coverage.missing | join(","))|\(.coverage.missing_reasons[0].reason | length > 0)|\(.waiting.reason)"' "$f")" \
+    "an unread secondmate is named as missing, with its reason, instead of a complete count"
+  pass "an unread backlog backend or secondmate is published as missing, never as a complete or zero count"
+}
+
 test_request_index_is_bounded() {
   local home pid lister rows i list f quotes
   home=$(make_home request-bound)
@@ -996,5 +1032,6 @@ test_request_index_is_bounded
 test_answering_one_of_four_waiting_requests_leaves_three
 test_partial_answer_keeps_all_four_waiting
 test_cut_question_is_answered_only_from_the_whole_text
+test_unread_sources_never_publish_a_complete_count
 
 echo '# all fm-console-signals tests passed'

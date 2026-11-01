@@ -24,10 +24,13 @@
 #                      deferred, blocked, parked, other, stale, total}
 #                      (bin/fm-captain-pending.sh owns the buckets); never
 #                      derived from questions[]. With coverage.complete false
-#                      they cover the ledger only.
-#   coverage           {complete, missing[], ledger_unreadable_lines}: missing
-#                      names "backlog" and "status" when the view's fleet
-#                      snapshot was unavailable.
+#                      they cover only the sources read: a lower bound.
+#   coverage           {complete, missing[], missing_reasons[], missing_omitted,
+#                      ledger_unreadable_lines}: missing names, once each and
+#                      at most 16, every source the view did not read in full
+#                      (bin/fm-captain-pending.sh owns them: backlog, status,
+#                      secondmates, secondmate:<id>), and missing_reasons
+#                      gives {source, reason} for each.
 #   view_generated_at  when the view was computed; a reused view is older than
 #                      generated_at.
 #   requests[]         every open item of the view, compact: id (cut to 128
@@ -65,9 +68,11 @@
 #     exists, else "none"; its reason is the first question's topic, followed
 #     by "(+N more waiting)" when more than four live items exist. Chat and
 #     status prose outside these records are never read.
-#     When the view's fleet snapshot is unavailable (`list` exit 3), only the
-#     ledger is reliable: its entries are published with "holds and status
-#     decisions unreadable" in the reason, and with no open entry nothing is
+#     When the view did not read every source (its coverage is incomplete, or
+#     `list` exits 3 because its fleet snapshot is unavailable), what it did
+#     read is published with the unread sources named in the reason - "holds
+#     and status decisions unreadable", "captain holds unreadable", or
+#     "secondmate calls unreadable" - and with no live item readable nothing is
 #     published (exit 1), so the previous file ages instead of claiming that
 #     nothing waits. Any other `list` failure also publishes nothing. `write`
 #     keeps the last complete view in state/.console-signals-pending.json and

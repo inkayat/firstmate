@@ -333,3 +333,55 @@ expect_exit 4 pending "$home" answer cp-9 --note-ref "$n4"
 assert_equals not-found "$(note_outcome "$home" "$n4")" "an unknown entry is not marked not-found"
 assert_equals 0 "$(field "$(pending "$home" list --json --ledger-only)" .counts.live)" "answered and dropped entries still count"
 pass "a ledger entry is answered or dropped by its answer note once, with the outcome on the note"
+
+# --- honest coverage: an unread backlog backend or secondmate is never a zero ---
+home=$(make_home other-backend)
+printf 'backend = "beads"\n' > "$home/.tasks.toml"
+cat > "$home/data/backlog.md" <<EOF2
+## In flight
+## Queued
+- [ ] stale-call - Stale markdown call (repo: alpha) (since 2026-10-30) (hold: pick one) (hold-kind: captain)
+  Captain hold set: 2026-10-30T09:15:00Z
+## Done
+EOF2
+pending "$home" add --kind question -- "Ship on Friday?" >/dev/null
+view=$(pending "$home" list --json) || fail "a home on another backlog backend could not be listed"
+assert_equals 'false|backlog|1|0' \
+  "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))|\(.counts.live)|\([.waiting_on_captain[] | select(.source == "backlog")] | length)"')" \
+  "captain holds on a backlog backend the view does not read are unknown, and no stale markdown row stands in for them"
+assert_contains "$(field "$view" '.coverage.missing[0].reason')" "beads" "the reason does not name the unread backend"
+assert_contains "$(pending "$home" list)" "INCOMPLETE" "the human view does not say it is incomplete"
+pass "a backlog backend the view cannot read leaves its captain holds unknown, never zero"
+
+mate_summary() {  # <mate-home> <decisions-shown> <decisions-total>
+  jq -n --arg home "$1" --argjson shown "$2" --argjson total "$3" --argjson epoch "$(date +%s)" '{
+    schema:"fm-secondmate-home-summary.v1", hold_classifier_schema:"fm-captain-hold-buckets.v1",
+    generated:(now | todate), generated_epoch:$epoch, home:$home, valid:true, reason:null,
+    invalidity:{kind:null, ids:[]}, state:"captain_decision", active_children:[],
+    decisions_open:[range(0; $shown) | {id:"call-\(.)", key:"call-\(.)", verb:"captain-hold", summary:"Call \(.)",
+      reason:"choose", hold_until:null, hold_bucket:"live", hold_age_days:null, source:"backlog"}],
+    holds:[], queued:[], landed:[], endpoints:[],
+    counts:{active_children:0, decisions_open:$total, holds:0, queued:0, landed:0, endpoints:0}, omitted:[]}' \
+    > "$1/state/home-summary.json"
+}
+home=$(make_home secondmates)
+for m in mate-a mate-b; do
+  mkdir -p "$TMP_ROOT/$m/data" "$TMP_ROOT/$m/state" "$TMP_ROOT/$m/config" "$TMP_ROOT/$m/projects" "$TMP_ROOT/$m/bin"
+  printf '# fixture\n' > "$TMP_ROOT/$m/AGENTS.md"
+  printf '%s\n' "$m" > "$TMP_ROOT/$m/.fm-secondmate-home"
+done
+printf -- '- mate-a - fixture (home: %s; scope: fixture; projects: alpha; added 2026-10-30)\n' "$TMP_ROOT/mate-a" > "$home/data/secondmates.md"
+mate_summary "$TMP_ROOT/mate-a" 1 1
+view=$(pending "$home" list --json) || fail "a home with a fully read secondmate could not be listed"
+assert_equals 'true|' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a fully read secondmate leaves the view complete"
+mate_summary "$TMP_ROOT/mate-a" 1 3
+printf -- '- mate-b - fixture (home: %s; scope: fixture; projects: alpha; added 2026-10-30)\n' "$TMP_ROOT/mate-b" >> "$home/data/secondmates.md"
+view=$(pending "$home" list --json) || fail "a home with unread secondmates could not be listed"
+assert_equals 'false|secondmate:mate-a,secondmate:mate-b' "$(field "$view" '"\(.coverage.complete)|\([.coverage.missing[].source] | join(","))"')" \
+  "a secondmate whose captain calls were cut, or whose summary is unreadable, leaves the view incomplete"
+assert_contains "$(field "$view" '.coverage.missing[0].reason')" "1 of 3" "the cut is not disclosed"
+view=$(FM_SNAPSHOT_SECONDMATES=1 pending "$home" list --json) || fail "a bounded secondmate read could not be listed"
+assert_contains "$(field "$view" '[.coverage.missing[].source] | join(",")')" "secondmates" \
+  "secondmates beyond the snapshot bound are not disclosed"
+pass "an unread or truncated secondmate leaves the view incomplete instead of counting it as complete"

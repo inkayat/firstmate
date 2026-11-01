@@ -82,6 +82,7 @@
 # session-start digest uses it.
 # `list --json` prints schema `fm-captain-pending-list.v1`: generated, fm_home,
 # ledger {path,present,unreadable_lines}, fleet {available,reason},
+# coverage {complete,missing[]},
 # counts {live,waiting_on_captain,paused_by_captain_order,paused_other_reason,
 # needs_recheck,deferred,blocked,parked,other,stale,total}, and one array per
 # section. Each item carries id, source, kind, key, task_id, age_seconds, age
@@ -101,6 +102,16 @@
 # with a generation and null otherwise; a console renders the item's whole text
 # from this same document and sends the captain's words with that exact
 # answer_to (bin/fm-inbox.sh note --answer-to).
+# coverage names, as {source, reason}, every source this view did not read in
+# full, and complete is true only when there is none; the counts then cover
+# only what was read, so they are a lower bound and never a complete zero.
+# Sources: backlog and status when the snapshot was unavailable; backlog when
+# this home keeps its backlog in a backend other than the markdown file the
+# snapshot parses (its captain holds are unknown, and no row from a leftover
+# markdown file is listed); secondmates when the secondmate registry was not
+# read in full or registered secondmates lay beyond the snapshot bound; and
+# secondmate:<id> when a secondmate's summary was unavailable or cut its
+# captain calls. The human view prints one INCOMPLETE line per source.
 #
 # Exit codes: 0 success; 1 refused or failed; 2 usage; 4 a --note-ref close
 # refused because the entry is not open (its outcome is on the note). `list`
@@ -393,8 +404,10 @@ cmd_show() {
 
 # Build the combined view JSON from the ledger fold and an optional snapshot.
 # Inputs are files so a large snapshot never rides on the command line.
-build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <now-epoch> <now-iso> <paused-verb>
-  local fold_file=$1 snap_file=$2 reason=$3 today=$4 now=$5 now_iso=$6 paused_verb=$7 snap_args
+# <backlog-unread> is why the snapshot's markdown backlog parse is not this
+# home's live backlog (empty when it is); its captain holds are then unknown.
+build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <now-epoch> <now-iso> <paused-verb> <backlog-unread>
+  local fold_file=$1 snap_file=$2 reason=$3 today=$4 now=$5 now_iso=$6 paused_verb=$7 backlog_unread=$8 snap_args
   if [ -n "$snap_file" ]; then
     snap_args="$snap_file"
   else
@@ -409,10 +422,33 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
     --arg generated "$now_iso" \
     --arg fm_home "$FM_HOME" \
     --arg ledger_path "$LEDGER" \
-    --arg paused_verb "$paused_verb" '
+    --arg paused_verb "$paused_verb" \
+    --arg backlog_unread "$backlog_unread" '
     ($fold[0]) as $ledger
     | ($snaps[0] // null) as $snap
-    | ([ $snap.backlog.records[]? | select(.structured == true) ]) as $rows
+    | (if $backlog_unread != "" then []
+       else [ $snap.backlog.records[]? | select(.structured == true) ] end) as $rows
+    # Every source this view could not read in full. A missing source makes the
+    # counts a lower bound: nothing it holds may read as zero or complete.
+    | ($snap.secondmate_current // null) as $sm
+    | (if $snap == null then
+         [ {source:"backlog", reason:$reason}, {source:"status", reason:$reason} ]
+       else
+         (if $backlog_unread != "" then [ {source:"backlog", reason:("captain holds unknown: " + $backlog_unread)} ] else [] end)
+         + (if $sm == null or ($sm.registry.complete // true) == true then []
+            else [ {source:"secondmates", reason:("the secondmate registry was not read in full"
+                     + (if ($sm.registry.reason // null) != null then ": " + $sm.registry.reason else "" end))} ] end)
+         + (if ($sm.truncated // 0) > 0
+            then [ {source:"secondmates", reason:"\($sm.truncated) registered secondmate(s) beyond the snapshot bound were not read"} ]
+            else [] end)
+         + [ $sm.records[]?
+             | if .provenance.selected != "structured-home" then
+                 {source:("secondmate:" + .id), reason:(.current.reason // "secondmate summary unavailable")}
+               elif (.counts.decisions_open // 0) > ((.decisions_open // []) | length) then
+                 {source:("secondmate:" + .id),
+                  reason:"secondmate captain calls cut to \((.decisions_open // []) | length) of \(.counts.decisions_open)"}
+               else empty end ]
+       end) as $missing
     | ([ $snap.tasks[]? ]) as $tasks
     | def row($id): first($rows[] | select(.id == $id)) // null;
       def task($id): first($tasks[] | select(.id == $id)) // null;
@@ -520,6 +556,7 @@ build_view() {  # <fold-file> <snapshot-file-or-empty> <fleet-reason> <today> <n
         fm_home:$fm_home,
         ledger:{path:$ledger_path, present:$ledger.present, unreadable_lines:$ledger.unreadable},
         fleet:{available:($snap != null), reason:(if $snap != null then null else $reason end)},
+        coverage:{complete:(($missing | length) == 0), missing:$missing},
         counts:{
           live:([ $all[] | select(.live) ] | length),
           waiting_on_captain:($waiting | length),
@@ -560,7 +597,7 @@ render_view() {  # <ledger-only 0|1>; reads the view JSON on stdin
     else
       (if .fleet.available | not then
          "INCOMPLETE: backlog and status sources unavailable (\(.fleet.reason)); only the ledger is shown"
-       else empty end),
+       else (.coverage.missing[] | "INCOMPLETE: \(.source): \(.reason)") end),
       "live asks: \(.counts.live)",
       section("WAITING ON CAPTAIN"; .waiting_on_captain),
       section("PAUSED BY CAPTAIN ORDER"; .paused_by_captain_order),
@@ -569,8 +606,32 @@ render_view() {  # <ledger-only 0|1>; reads the view JSON on stdin
   '
 }
 
+# Why the fleet snapshot's backlog parse - the markdown data/backlog.md it reads
+# - is not this home's live backlog; nothing when it is. A home with no data
+# directory records no captain calls, so that is not unread.
+backlog_unread_reason() {
+  local data root backend
+  [ -d "$DATA" ] || return 0
+  # shellcheck source=bin/fm-tasks-axi-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+  # shellcheck source=bin/fm-backlog-transition-lib.sh
+  # shellcheck disable=SC1091
+  . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  if ! data=$(fm_backlog_data_absolute "$DATA" 2>/dev/null) || ! root=$(fm_backlog_root "$data" 2>/dev/null); then
+    printf 'the data directory %s cannot be resolved' "$DATA"
+    return 0
+  fi
+  if ! backend=$(fm_tasks_axi_backend_resolve "$root" 2>/dev/null); then
+    printf 'the backlog backend configuration under %s cannot be read' "$root"
+    return 0
+  fi
+  [ "$backend" = markdown ] \
+    || printf 'this home keeps its backlog in the %s backend, which this view does not read' "$backend"
+}
+
 cmd_list() {
-  local json=0 ledger_only=0 fold_file snap_file='' reason='' today now now_iso_v view paused_verb rc=0 err_file
+  local json=0 ledger_only=0 fold_file snap_file='' reason='' today now now_iso_v view paused_verb rc=0 err_file backlog_unread=''
   while [ $# -gt 0 ]; do
     case "$1" in
       --json) json=1; shift ;;
@@ -604,9 +665,10 @@ cmd_list() {
       snap_file=''
       rc=3
     fi
+    [ -z "$snap_file" ] || backlog_unread=$(backlog_unread_reason)
   fi
 
-  view=$(build_view "$fold_file" "$snap_file" "$reason" "$today" "$now" "$now_iso_v" "$paused_verb") \
+  view=$(build_view "$fold_file" "$snap_file" "$reason" "$today" "$now" "$now_iso_v" "$paused_verb" "$backlog_unread") \
     || fail "cannot build the combined view"
   if [ "$json" = 1 ]; then
     printf '%s\n' "$view" | jq .

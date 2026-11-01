@@ -1382,11 +1382,16 @@ load_remaining() {  # <path>; sets REMAINING_REASON
 
 # The request generation the combined view shows for <task-id> now, read
 # through the same backlog parser; empty when that parser does not carry the
-# row as an open captain hold (another backlog backend, or no such hold).
+# row as an open captain hold, and on a backlog backend other than markdown,
+# where any data/backlog.md left behind is not the live backlog.
 current_request_generation() {  # <task-id>
-  local out secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
+  local out data root backend secs=${FM_BACKLOG_ROW_TIMEOUT_SECS:-10}
   case "$secs" in ''|*[!0-9]*) secs=10 ;; esac
   command -v jq >/dev/null 2>&1 || return 1
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  backend=$(fm_tasks_axi_backend "$root") || return 1
+  [ "$backend" = markdown ] || return 0
   out=$(fm_run_timed "$secs" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
     "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input 2>/dev/null) || return 1
   printf '%s' "$out" | jq -r --arg id "$1" \
