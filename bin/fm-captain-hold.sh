@@ -1402,11 +1402,11 @@ current_request_generation() {  # <task-id>
 # result itself is already durable, so a failed write names the retry, which is
 # idempotent, rather than reporting success.
 record_note_outcome() {  # <outcome> [<generation-after>]
-  local -a after=()
+  local -a after_args=()
   [ -n "$NOTE_REF" ] || return 0
-  [ -z "${2:-}" ] || after=(--generation-after "$2")
+  [ -z "${2:-}" ] || after_args=(--generation-after "$2")
   answer_inbox record-outcome "$NOTE_REF" --outcome "$1" --generation-seen "$NOTE_GENERATION" \
-    "${after[@]+"${after[@]}"}" >/dev/null && return 0
+    "${after_args[@]+"${after_args[@]}"}" >/dev/null && return 0
   printf 'fm-captain-hold: the %s result is durable, but it was not recorded on inbox note %s; re-run this same command to record it\n' \
     "$1" "$NOTE_REF" >&2
   exit 1
@@ -1505,7 +1505,7 @@ answer_at_version() {  # <task-id> <expect> <outcome> <occurrence> <shown-row>
     mode=${match#* }
     [ "$mode" = "$outcome" ] \
       || fail "task $id already records this answer as $mode; retry it with the same mode"
-    if [ "$state" != done ] && [ "$hold_kind" = captain ]; then
+    if [ "$state" != "done" ] && [ "$hold_kind" = captain ]; then
       if [ "$pos" = 1 ] && [ "$(body_hold_set_timestamp "$decoded")" = "${expect%%#*}" ]; then
         finish_answer "$id" "$outcome" "$show"
         publish_answer_outcome "$id" $((occurrence - 1)) "$outcome"
@@ -1515,7 +1515,7 @@ answer_at_version() {  # <task-id> <expect> <outcome> <occurrence> <shown-row>
       publish_answer_outcome "$id" $((occurrence - 1)) "$mode"
     fi
   else
-    [ "$state" != done ] || refuse_answer already-closed "$id" '' "captain-held task $id is already closed; nothing was changed"
+    [ "$state" != "done" ] || refuse_answer already-closed "$id" '' "captain-held task $id is already closed; nothing was changed"
     [ "$hold_kind" = captain ] \
       || refuse_answer already-closed "$id" '' "task $id is no longer held for the captain; nothing was changed"
     current=$(current_request_generation "$id") \
@@ -1587,7 +1587,7 @@ command_answer() {
     answer_at_version "$id" "$expect" "$outcome" "$occurrence" "$show"
     return 0
   fi
-  if [ "$outcome" = partial ] && { [ "$state" = done ] || [ "$hold_kind" != captain ]; }; then
+  if [ "$outcome" = partial ] && { [ "$state" = "done" ] || [ "$hold_kind" != captain ]; }; then
     fail "a partial answer keeps the call held, but task $id is not held for the captain"
   fi
 

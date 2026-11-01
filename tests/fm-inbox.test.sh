@@ -618,9 +618,9 @@ second=$(printf 'Go with north' | run_inbox "$home" note --request-id reply-2 --
 unrelated=$(run_inbox "$home" note "an ordinary idea") || fail "plain note failed"
 unrelated=${unrelated#queued }; unrelated=${unrelated%%$'\n'*}
 set +e
-wrong_gen=$(run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen cp-4 2>&1); wrong_gen_code=$?
-bad_outcome=$(run_inbox "$home" record-outcome "$second" --outcome seen --generation-seen cp-3 2>&1); bad_outcome_code=$?
-not_answer=$(run_inbox "$home" record-outcome "$unrelated" --outcome answered --generation-seen cp-3 2>&1); not_answer_code=$?
+run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen cp-4 >/dev/null 2>&1; wrong_gen_code=$?
+run_inbox "$home" record-outcome "$second" --outcome seen --generation-seen cp-3 >/dev/null 2>&1; bad_outcome_code=$?
+run_inbox "$home" record-outcome "$unrelated" --outcome answered --generation-seen cp-3 >/dev/null 2>&1; not_answer_code=$?
 set -e
 expect_code 1 "$wrong_gen_code" "an outcome for another version is refused"
 expect_code 1 "$bad_outcome_code" "delivery or sight is not an outcome"
@@ -632,7 +632,7 @@ run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen 
 run_inbox "$home" record-outcome "$second" --outcome answered --generation-seen cp-3 >/dev/null \
   || fail "the same outcome again is idempotent"
 set +e
-flip=$(run_inbox "$home" record-outcome "$second" --outcome already-closed --generation-seen cp-3 2>&1); flip_code=$?
+run_inbox "$home" record-outcome "$second" --outcome already-closed --generation-seen cp-3 >/dev/null 2>&1; flip_code=$?
 set -e
 expect_code 1 "$flip_code" "an applied outcome is never replaced by another"
 assert_equals "answered|ledger:cp-3|cp-3|None" \
