@@ -353,6 +353,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/console-submit.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
     },

@@ -25,7 +25,8 @@
 //
 // Read-only toward Pi. It reads event payloads and SessionManager getters and
 // never sends messages, appends entries, or registers tools, commands, or bus
-// events. Sending stays with fm-inbox; current.json publishes submit:false.
+// events. Sending stays outside the journal (fm-inbox, or on omp the console
+// submit channel, docs/console-submit.md); current.json publishes submit:false.
 //
 // Never blocking. Handlers do bounded in-memory work and return. All disk work
 // and every operational-input classification run on one serial writer per
