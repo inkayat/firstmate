@@ -1,7 +1,7 @@
 ---
 name: captain-hold-lifecycle
 description: >-
-  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, when choosing between a captain-held task and a captain-pending ledger entry for an ask, and on any RECORD DIVERGENCE line the wake drain prints.
+  Load before treating an investigation, scout report, structured review, or Lavish review as complete, before ending a visual review that exposed a captain decision, when recording or routing the captain's answer, and on any RECORD DIVERGENCE line the wake drain prints.
 user-invocable: false
 metadata:
   internal: true
@@ -35,9 +35,6 @@ A merge approval uses that existing release path because approval permits the me
 Closing a held row at merge approval instead records completion before landing, so the backlog claims completion before the work actually ships.
 When the answer changes what a task must build, follow `AGENTS.md` section 7's mid-task ask rule to preserve the captain's words in the brief and steer the worker.
 When the captain says "later", that is an answer too: re-hold with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` so the item leaves the live Captain's Call and resurfaces on its date, instead of leaving a live-looking card or fabricating a closure.
-When the captain answers only some of a held call's questions, record those words with `bin/fm-captain-hold.sh answer <id> --remaining-file <path>`, the file holding exactly the questions still open, so the call stays held on what remains instead of being closed or left showing questions already answered.
-A captain inbox note that carries `answer_to` is the captain's words for one version of one request: apply it only through `--note-ref <note-id>` on `bin/fm-captain-hold.sh answer` or `bin/fm-captain-pending.sh answer|drop`, which refuse a request that changed since and record the outcome on the note; never re-type it as an unversioned answer.
-When such a note is not applied - it does not answer the question, or it was refused because the request changed - reply on the note with why, so the captain can answer the current text; saving, announcing, or handling a note never answers anything, and the inbox refuses to mark it handled until it has an outcome or a reply.
 "A keyed answer resolves its matching captain-held task" is one capability with one owner, `bin/fm-captain-hold.sh answers`, and every channel that carries a captain answer feeds it the same task id and answer; a channel never maps keys to tasks, records a decision, or resolves anything itself.
 Chat already feeds it through `bin/fm-send.sh --resolve-key`, and a captured-answer source feeds it once bound with `bin/fm-captain-hold.sh bind <source-id>`; bind before arming the source, and key each structured question by the held task's id.
 An unbound source and a key that names no captain-held task both simply feed nothing: the answer is still captured and firstmate is still woken, and closing falls back to the direct command above.
@@ -53,11 +50,6 @@ Never use `answer` for an evidence-only moot call: `answer` records what the cap
 A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
-
-An ask that gates no backlog work - a question raised only in chat, an approval, a command the captain must run, an action only the captain can take - has no task to hold, so it goes in the captain-pending ledger instead: `bin/fm-captain-pending.sh add` at ask time, with `--task` when it concerns a task and `--key` when the same ask may be raised again.
-An ask that gates a backlog item is held on that item and never also added to the ledger, because one ask recorded in two places drifts.
-Close a ledger entry with `answer --note` carrying the captain's words, or `drop --note` when it became moot; never leave an answered entry open.
-`bin/fm-captain-pending.sh list` is the one combined view of the ledger, captain holds, parked work, and open status decisions; read it when the captain asks what is waiting on the captain, and its `--help` owns the sections and labels.
 
 A captain call can be written down twice - as the keyed status decision the fold reads, and as the backlog task held for the captain - and those two records can disagree without either surface saying so.
 `bin/fm-captain-hold.sh diverged` reports that contradiction and the wake drain prints it as `RECORD DIVERGENCE`; it closes nothing, because a captain call closed wrongly leaves review entirely, which is worse than the noise.

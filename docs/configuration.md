@@ -10,7 +10,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Firstmate's code, private files, or project location | [FM_HOME](#fm_home) and [operational home layout](#operational-home-layout-and-state) |
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Codex approval review](#codex-automatic-approval-review), [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [Codex permission mode](#codex-permission-mode-configcodex-permission-mode), [persistent managed-policy failover](#persistent-managed-policy-failover), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), [worker tool exclusions](#worker-tool-exclusions-configcrew-exclude-tools), [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist), and its [Orca environment source](#orca-environment-source-configlaunch-env-tmux-session) |
-| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
+| Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), [external memory tiers](#external-memory-tiers-memory-layering-section), [record export](#record-export-configrecord-export-root), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
 | Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [warm-cache compaction](#warm-cache-compaction-configwarm-compact), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Review bots on owned GitHub pull requests | [Contribution review bots](#contribution-review-bots-configcontribution-review-bots) |
@@ -96,7 +96,6 @@ Each effective `FM_HOME` contains private operational directories.
 - Project and secondmate registries.
 - Captain preferences and optional shared captain preferences.
 - Learnings, backlog, briefs, scout reports, optional task status archives, and the optional per-task no-mistakes pipeline-spend ledger.
-- The [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl) of asks waiting on the captain.
 - Explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 
 `state/` holds runtime records:
@@ -110,9 +109,6 @@ Each effective `FM_HOME` contains private operational directories.
 - Private secondmate config-reread generations with their retry and quarantine state.
 - Per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`).
 - Parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-- Captain inbox notes under `state/inbox/`, with their handled copies, replies, answer outcomes, and the log of wake acknowledgements that named a still-pending note, `state/inbox/.ack-overrides.log` (`bin/fm-inbox.sh`, `bin/fm-wake-drain.sh`).
-- The opt-in console-signals file `state/console-signals.json`, its last complete captain-pending view `state/.console-signals-pending.json`, and its last run's diagnostics in `state/.console-signals.log` (`bin/fm-console-signals.sh`).
-- The opt-in console submit channel `state/console-submit/`: queued and in-flight console messages, their receipts, and the delivering omp process's `consumer.json` ([console-submit.md](console-submit.md)).
 
 `config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`.
 
@@ -553,7 +549,7 @@ For spawn-capable adapters, the runtime session-provider backend controls where 
 | `rex` | Experimental; no dedicated real-backend CI lane | [`docs/rex-backend.md`](rex-backend.md) |
 | `t3code` | Experimental; no dedicated real-backend CI lane | [`docs/t3code-backend.md`](t3code-backend.md) |
 | `tern` | Experimental; no dedicated real-backend CI lane | [`docs/tern-backend.md`](tern-backend.md) |
-| `hc` | Experimental; the `tests-hc` lane runs the hc family against the pinned build | [`docs/hc-backend.md`](hc-backend.md) |
+| `hc` | Experimental; no dedicated real-backend CI lane | [`docs/hc-backend.md`](hc-backend.md) |
 
 Treehouse remains the worktree provider for tmux, herdr, zellij, cmux, paseo, rex, t3code, tern, and hc, since herdr, zellij, cmux, paseo, rex, t3code, tern, and hc are session providers only; Orca provides both the task worktree and terminal endpoint.
 
@@ -601,7 +597,7 @@ The compatibility helper `fm_backend_agent_alive` continues to collapse those de
 
 - A rex spawn additionally gates both the `rex` CLI and the running Rex server at API revision 5 or newer and requires `jq` (see [`docs/rex-backend.md`](rex-backend.md) "Setup"), refusing loudly on a missing CLI, an older API revision, or a server that cannot be reached or started.
 - A tern spawn requires `tern` and `jq`, refusing loudly when either is missing (see [`docs/tern-backend.md`](tern-backend.md) "Setup"); bootstrap reports a missing `tern` as `MISSING_MANUAL` with `https://stencil.so/tern`.
-- For hc spawn prerequisites, binary resolution, and compatibility gates, see [`docs/hc-backend.md`](hc-backend.md#setup).
+- An hc spawn requires `hc` and `jq` and a core that `hc server status` can reach or start (see [`docs/hc-backend.md`](hc-backend.md) "Setup").
 
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 
@@ -848,29 +844,6 @@ Publishing is best-effort and never changes what the watcher does; no spawn read
 No Firstmate script calls it.
 The script's header owns the report line, the published document's fields, the verdict, the beat freshness rules, the host-constraint thresholds, and the probe fallbacks.
 
-## Console signals (config/console-signals)
-
-The optional local, gitignored `config/console-signals` presence flag opts this home into publishing `state/console-signals.json`, the `fm-console-signals.v1` file Astro's FirstMate page (the herdr-console repository) reads to show that FirstMate waits for the captain and why, its open questions, and its registered bots.
-The consumer's `docs/firstmate-console-signals.md` in that repository is the authority for the format; [`bin/fm-console-signals.sh`](../bin/fm-console-signals.sh)'s header owns what this home puts in it, and `bin/fm-console-signals.sh print` shows the current document without writing it.
-Create the flag with `touch "$FM_HOME/config/console-signals"`; remove it to stop publishing, and the last file then goes stale on its own.
-The flag is a home-local choice and is not inherited by secondmate homes.
-
-While the flag exists, the watcher runs `bin/fm-console-signals.sh write` detached at each poll once the file is at least 10 seconds old, so at the default 15-second poll it is rewritten about every 15 seconds and a new or answered ask shows within one poll.
-The questions and the wait come only from the [captain-pending ledger](#captain-pending-ledger-datacaptain-pendingjsonl)'s combined view, `bin/fm-captain-pending.sh list --json`, so chat-only ledger entries appear beside live captain holds and live status decisions; the bots come only from the bot code's own `fm-bot list` and `show` output; neither reads chat or status prose.
-When that view could not read every source - its fleet snapshot was unavailable, the home keeps its backlog in a backend the view does not parse, or a secondmate's summary was unreadable, cut, or beyond the snapshot bound - what it read is published marked incomplete with the unread sources named, and with nothing readable waiting the previous file is left to age rather than claiming that nothing waits.
-A complete view is reused for up to 60 seconds while the files it reads are unchanged, which keeps an idle fleet from running it every poll.
-Beside the four questions the file carries additive keys an older console ignores: exact per-bucket counts from the view, its coverage, when the view was computed, and a bounded index of every open request with its generation, so no count is ever read off the questions shown.
-A console answers a request with an inbox answer note bound to that generation (`bin/fm-inbox.sh note --answer-to`), and only firstmate's apply command changes the request and records the outcome on the note; [`docs/captain-hold-lifecycle.md`](captain-hold-lifecycle.md#versioned-answers) explains the mechanism.
-The file is written only while the home's session lock is held, carries that lock's pid, and is removed when the lock is free or stale.
-Publishing adds no model call, no network access, and no long-lived process: each run is one short local process the watcher never waits for, and a slow or failing run only leaves the previous file to age and its reasons in `state/.console-signals.log`.
-
-## Console submit (config/console-submit)
-
-The optional local, gitignored `config/console-submit` presence flag opts this home, on this machine, into the console submit channel: a same-user console such as Astro's FirstMate page runs `bin/fm-console-submit.sh enqueue` to put the captain's own message into the omp primary's conversation as an ordinary user turn, and the answer streams back through the console journal.
-[console-submit.md](console-submit.md) owns the contract, including delivery, receipts, bounds, and trust, and [`bin/fm-console-submit.sh`](../bin/fm-console-submit.sh)'s header owns the command line.
-Create the flag with `touch "$FM_HOME/config/console-submit"`, then let the running omp primary load `.omp/extensions/fm-console-submit.ts` with `/reload`; remove the flag to stop it within half a second.
-The flag is a home-local choice and is not inherited by secondmate homes, and only an omp primary delivers.
-
 ## PR-ready line after green (config/ready-after-green)
 
 The optional local, gitignored `config/ready-after-green` presence flag opts a secondmate home into publishing its child's PR-ready parent line only after the child has reported checks green.
@@ -1063,10 +1036,10 @@ The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the exact base rule, and the
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) keeps test evidence private with `test.evidence.store_in_repo: false` and `test.evidence.attach_media: false`, sets `auto_fix.ci: 0`, and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.
-Evidence therefore stays on local disk under the no-mistakes home: no run pushes an orphan evidence branch or uploads media to GitHub, and the worktree's `.no-mistakes/` stays local, with CI rejecting tracked entries under that path.
-With `auto_fix.ci: 0`, a CI failure or a merge conflict with the base branch waits for an explicit gate answer instead of an automatic repair, so the CI step never rebases or force-pushes a branch on its own.
-No-mistakes reads these evidence and auto-fix fields from the pushed branch rather than from the default-branch copy.
+The tracked [`.no-mistakes.yaml`](../.no-mistakes.yaml) sets `test.evidence.store_in_repo: true` and runs the canonical [shell/workflow lint](../bin/fm-lint.sh) followed by the [Pi production-consumer typecheck](../tests/fm-pi-primary-types.test.sh) in the compiler-owning lint phase.
+Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
+
+That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-guidelines/SKILL.md#no-mistakes-test-configuration) owns why `commands.test` stays absent and targeted validation belongs to the evidence path.
 
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
@@ -1088,26 +1061,6 @@ Fleet-local operational facts and gotchas live locally in `data/learnings.md`; i
 The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
 
 There is no shared learnings file by captain decision.
-
-## Captain-pending ledger (data/captain-pending.jsonl)
-
-Each home records what the captain owes that has no backlog task or hold of its own - a question asked only in chat, an approval, a command the captain must run, or a task only the captain can do - in its private `data/captain-pending.jsonl`.
-The file is gitignored with the rest of `data/`, resolves through `FM_HOME` (or `FM_DATA_OVERRIDE`), and is created on the first `add`; an absent file means nothing is recorded.
-[`bin/fm-captain-pending.sh`](../bin/fm-captain-pending.sh) is the only writer and owns the commands, locking, and the combined `list` view; its `--help` documents them.
-A captain call that gates a backlog task stays a captain hold, as the internal `captain-hold-lifecycle` skill describes, and is never also recorded here.
-
-The file is append-only JSON Lines, one event per line, and an entry's current state is the fold of its events.
-Every event carries `v` (always `1`), `event`, `id`, `at` (UTC ISO-8601), and `epoch` (Unix seconds).
-
-| Event | Additional fields | Effect |
-| --- | --- | --- |
-| `add` | `seq` (integer), `kind` (`question`, `approval`, `command`, `task`, or `other`), `text`, and nullable `task`, `key`, and `due` (`YYYY-MM-DD`) | Creates open entry `cp-<seq>`. |
-| `answer` | nullable `note` (the captain's answer); `note_ref` when a console answer note closed it | Marks an open entry `answered`. |
-| `drop` | nullable `note` (why it no longer needs the captain); `note_ref` when a console answer note closed it | Marks an open entry `dropped`. |
-
-An entry is `open` until its first `answer` or `drop`; later close events for the same id are ignored.
-Readers skip and count lines that are not well-formed version-1 records, so a line torn by a crash never hides the rest of the ledger.
-Secondmate homes keep their own ledgers; a secondmate's asks reach the primary through its parent channel.
 
 ## External memory tiers (Memory layering section)
 
@@ -1621,16 +1574,6 @@ When the file is absent, worker launches do not add a board address and retain t
 
 Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
-
-## Selected worker roles and skills
-
-Ship and scout tasks can supply an explicitly selected canonical role and independently selected skills through the typed inputs owned by [`fm-brief.sh --help`](../bin/fm-brief.sh).
-Firstmate resolves the role's skill associations before launch and supplies the actual source bodies, rather than asking the worker to discover or manually load a role default.
-Hidden associated skills remain eligible, independent selections are preserved, and canonical duplicate sources are supplied once with both origins recorded.
-Project instructions and applicable project-local skills retain precedence over selected roles and shared skills.
-Missing or malformed declared sources stop preparation; tasks without a selection retain their existing behavior.
-This is Firstmate prepared-input injection, not native OMP subagent selection, and it does not choose a role, workflow, model, or routing policy.
-The preparation and per-adapter delivery mechanics are owned by [`fm-spawn.sh --help`](../bin/fm-spawn.sh); [`worker preparation regressions`](../tests/fm-worker-preparation.test.sh) exercise the executable path without model generation.
 
 ## Home brief include (config/brief-include.md)
 
@@ -3304,8 +3247,6 @@ FM_HOME_SUMMARY_INTERVAL=300   # seconds before a live watcher refreshes this ho
 FM_HOME_SUMMARY_TIMEOUT=60     # seconds bounding the complete best-effort home-summary refresh, including lock acquisition, validation, atomic publication, and worker-side failure logging; invalid or zero values use 60
 FM_HOME_SUMMARY_ERROR_LOG_MAX_BYTES=65536   # approximate size cap for state/.home-summary-refresh.log before it is trimmed to the newest 200 lines; invalid or zero values use 65536
 FM_HOME_SUMMARY_FAILURE_REPORT=2   # recorded publication failures since the ledger's own last publication before session start reports a HOME_SUMMARY line; invalid or zero values use 2
-FM_CONSOLE_SIGNALS_TIMEOUT=20   # seconds bounding bin/fm-console-signals.sh's captain-pending view read and, separately, all of its bot reads together; values outside 1-300 use 20
-FM_CONFIG_ROOT=                 # a firstmate-config checkout whose bin/fm-bot bin/fm-console-signals.sh lists bots with; unset or without that file, an fm-bot on PATH is used, else no bots are published
 FM_SNAPSHOT_CREW_STATE_TIMEOUT=10   # seconds bounding each local per-task current-state read inside bin/fm-fleet-snapshot.sh; remote endpoint liveness is not probed on the snapshot path
 FM_SNAPSHOT_LOCAL_READ_CONCURRENCY=8   # maximum local tasks whose current-state and endpoint observations are collected concurrently during snapshot composition
 FM_SNAPSHOT_BUDGET=5                # one total seconds budget for all concurrent remote home-ledger reads

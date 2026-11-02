@@ -6,24 +6,6 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
-## Selected worker preparation
-
-Verified on 2026-10-18 on macOS arm64 with Node 24.19.0, using the real brief/spawn executables and isolated no-generation receivers:
-
-```sh
-bash bin/fm-test-run.sh tests/fm-worker-preparation.test.sh tests/fm-kimi-harness.test.sh tests/fm-rovo-harness.test.sh
-```
-
-The receivers observe associated and independent skill bodies in actual initial OMP/Codex arguments, missing-source refusal before a launch, current-source association removal, canonical deduplication with both origins, and compatibility without associations or a selected role.
-Managed source symlinks, hidden associations, malformed bindings, explicit source-root precedence, and raw-command refusal are covered.
-Claude's staged startup settings execute a context hook that returns the same worker identity and prepared bodies before a turn; Kimi/Rovo's first submitted text carries the context losslessly in one JSON line, avoiding literal terminal newline submissions.
-This verifies prepared delivery and the configured startup callback, not installed runtime adoption or model behavior.
-Backend-independent preparation does not claim new live-backend certification.
-The full portable OMP suite also passes under a real outer OMP process: its test-owned ancestry boundary excludes only the fixture root's outgoing parent link while preserving native named-process identities.
-Refresh that portable proof with `bash bin/fm-test-run.sh tests/fm-omp-harness.test.sh tests/fm-worker-preparation.test.sh`.
-[`fm-brief.sh`](../../bin/fm-brief.sh) and [`fm-spawn.sh`](../../bin/fm-spawn.sh) own the selection and delivery contract; this is Firstmate input preparation, not native OMP subagent autoload.
-
-
 ## Polytoken worker lifecycle
 
 Verified on 2026-10-14 with Polytoken 0.9.0 on macOS arm64 using the tmux worker path.
@@ -3525,23 +3507,16 @@ The default socket path under the scratchpad temp directory exceeded the 103-byt
 | `hc kill <t>` on a live shell | Exit 0; `hc get` then reports `state: finished`, `reason: killed`. |
 | `hc rm <t>` after kill | Exit 0; `hc get` then exits 3. |
 | `hc send <t> 'cd /usr'` | Pasted and submitted; `foreground.cwd` became `/usr`. |
-| `hc --version` (0.1.14, 2026-10-30) | Prints `hc 0.1.14`; the adapter's binary gate requires this `hc x.y.z` shape at or above 0.1.14. |
-| `hello` over `hc connect --session <s>` (0.1.14, 2026-10-30) | Answered `{"result":{"generation":1,...}}`; the adapter refuses any other generation. |
-| `hc send <t> --wait --timeout <n> -- <text>` (0.1.14, 2026-10-30) | Returns `{"started":<bool|null>,"wait":{"status",...}}`; `started:true` or `wait.status:working` natively confirms the submit. Exit 9 is `blocked` (never forced), 3 `not_found`, 11 `finished`; text after `--` survives leading dashes. |
-| `hc keys <t> -- <key>` (0.1.14, 2026-10-30) | Accepts the `--` delimiter before key names. |
-| `server stop` on a lab session (0.1.14, 2026-10-30) | Closes the API listener only; the session's `serve` and `hold` daemons stay by design and take ~30-60s to finish exiting after TERM/KILL. `bin/fm-hc-lab.sh` sweeps them by their exact `HC_SESSION=<name>` env token. |
 | `hc get` of a terminal running the user's `claude` wrapper | `foreground` was `{"name":"hats","argv":["/Users/fran/.cargo/bin/hats","run","--"]}`; the Claude process was another member of that process group. |
 
 ### Adapter lifecycle
 
-`tests/fm-backend-hc-smoke.test.sh` passed inside a `bin/fm-hc-lab.sh` session (hc 0.1.14, 2026-10-30): an `fm-hclab-*` core with scratch XDG roots, a pinned `FM_HC_SOCKET`, and a fleet-state tripwire that verified the recorded real-core file metadata inventory unchanged afterward.
-Teardown swept the session's `serve`/`hold` daemons by their `HC_SESSION` env token.
+`tests/fm-backend-hc-smoke.test.sh` passed against its own private core, which it stopped on exit:
 
 ```text
-ok - hc smoke: create_task started fm-hclab-smoke-28051-8595:t1
+ok - hc smoke: create_task started fmt55488:t1
 ok - hc smoke: current_path follows the shell's cwd
 ok - hc smoke: send_text_line ran the command and capture shows its output
-ok - hc smoke: send_text_submit delivers through send --wait (verdict empty)
 ok - hc smoke: agent_state reads dead for a shell and alive for an agent-named foreground
 ok - hc smoke: kill closes and removes the terminal
 FM_TEST_COMPLETE
@@ -3577,27 +3552,19 @@ Before the launch-line fix the same spawn could not type `+`, which every launch
 
 ### Live guard
 
-`tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host inside an `fm-hclab-*` lab session (hc 0.1.14, 2026-10-30):
+`tests/fm-backend-hc-liveness-live-e2e.test.sh` on this host:
 
 ```text
-# claude 2.1.314 (Claude Code): foreground={"argv":["/Users/kunchen/.local/bin/claude"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"2.1.314","pid":76277}
-ok - hc liveness: claude 2.1.314 (Claude Code) classifies alive in hc 0.1.14
-# codex codex-cli 0.155.1: foreground={"argv":["/opt/homebrew/bin/codex"],"cwd":".../fm-hclab-liveness-75126-29941/wt","name":"codex","pid":79249}
-ok - hc liveness: codex codex-cli 0.155.1 classifies alive in hc 0.1.14
-# opencode 1.18.32: foreground={"argv":["/opt/homebrew/bin/opencode"],"cwd":".../wt","name":"opencode","pid":83815}
-ok - hc liveness: opencode 1.18.32 classifies alive in hc 0.1.14
-# pi 0.82.0: foreground={"argv":["/opt/homebrew/bin/pi-signed"],"cwd":".../wt","name":"pi-launcher","pid":85772}
-ok - hc liveness: pi 0.82.0 classifies alive in hc 0.1.14
-# grok grok 1.0.41 (4220f3b224a6) [stable]: foreground={"argv":["/Users/kunchen/.local/bin/grok"],"cwd":".../wt","name":"grok-1.0.41-macos-aarch64","pid":87715}
-ok - hc liveness: grok grok 1.0.41 (4220f3b224a6) [stable] classifies alive in hc 0.1.14
-# unverified on this machine (not installed): kimi
+# claude 2.1.312 (Claude Code): foreground={"argv":["/Users/fran/.local/bin/claude"],"cwd":"/private/tmp/fmhl.gzWz93/wt","name":"2.1.312","pid":64496}
+ok - hc liveness: claude 2.1.312 (Claude Code) classifies alive in hc 0.1.13
+# codex codex-cli 0.163.0: foreground={"argv":["/Users/fran/.local/bin/codex"],"cwd":"/private/tmp/fmhl.gzWz93/wt","name":"codex","pid":65031}
+ok - hc liveness: codex codex-cli 0.163.0 classifies alive in hc 0.1.13
+# unverified on this machine (not installed): opencode pi grok kimi
 ```
-
-Teardown swept the session's serve/hold daemons plus the harness processes they held, and the fleet-state tripwire confirmed the recorded real-core file metadata inventory unchanged.
 
 ### Not verified
 
 - A ship spawn, and a spawn with a real harness rather than the stand-in.
-- `send --wait`'s `started`/`working` proof against a real status-reporting harness; the lab run covered a non-reporting shell, whose verdict falls to the composer screen.
+- Submit confirmation against a real harness composer, since no prompt was submitted.
 - Native `status.state` reported by a real harness launched through `bin/fm-spawn.sh`.
 - How the `herdr.space` and `herdr.tab` labels display in Herdr.app.

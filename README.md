@@ -212,21 +212,6 @@ Firstmate's skills live in two separate places with different audiences:
   Today that is `skills/stow`, a generic session-knowledge-sweep skill that routes findings by explicit instruction first, then existing local conventions, then a private `.stow-notes.md` fallback, and curates tiered entries through decay, local archival, and user-approved on-demand offload proposals.
   It intentionally shares no code with the firstmate-internal `.agents/skills/stow` it is named after, so the two can evolve independently.
 
-## Console signals
-
-An external console such as Astro can show what firstmate is waiting on without inspecting firstmate itself.
-A home opts in with a local presence flag; while it exists, the live watcher has `bin/fm-console-signals.sh` publish `state/console-signals.json` (schema `fm-console-signals.v1`): whether firstmate waits on the captain and why, the open questions waiting on the captain, and the registered bots.
-The watcher refreshes it in the background at most every 10 seconds, so in practice about once per poll.
-The producer only publishes that file (plus its own cache and log under `state/`); it never touches the inbox, decisions, or agents, and the console only reads the file.
-
-```bash
-touch "$FM_HOME/config/console-signals"   # enable
-rm "$FM_HOME/config/console-signals"      # disable; the last file then goes stale
-```
-
-It is off by default, and because `config/` and `state/` are gitignored, each machine opts in on its own.
-Setup and refresh behavior live in [docs/configuration.md](docs/configuration.md#console-signals-configconsole-signals); the document's contents are owned by the [`bin/fm-console-signals.sh`](bin/fm-console-signals.sh) header.
-
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) - maintainer architecture for the crew, supervision, worktrees, secondmates, and project modes.
@@ -236,7 +221,6 @@ Setup and refresh behavior live in [docs/configuration.md](docs/configuration.md
 - [docs/calm.md](docs/calm.md) - current `/calm` behavior on Pi and Claude Code and its supported presentation limits.
 - [docs/voice-relay.md](docs/voice-relay.md) - the optional spoken interface: setup on both machines, measured round-trip cost, what a spoken answer may read, and what this build does not do yet.
 - [docs/fleet-ledger.md](docs/fleet-ledger.md) - the opt-in activity ledger outside tools can read to follow a home's tasks, and its record contract.
-- [docs/console-submit.md](docs/console-submit.md) - the opt-in channel a same-user console such as Astro uses to send the captain's own message into an omp primary's conversation, with its receipts, bounds, and trust boundary.
 - [docs/wedge-alarm.md](docs/wedge-alarm.md) - configure the active alert for an away-mode escalation delivery that gets stuck.
 - [docs/usage-warner.md](docs/usage-warner.md) - configure the opt-in local threshold warner for Claude usage windows.
 - [docs/tmux-backend.md](docs/tmux-backend.md) - current setup and limits for the tmux reference backend.
