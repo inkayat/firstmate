@@ -1,0 +1,70 @@
+## select valid role
+exit 0
+{
+  "version": 1,
+  "role": "/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/roles/demo/ROLE.md",
+  "skills": [],
+  "skillRoots": [
+    "/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/sk"
+  ]
+}
+
+## prepare
+# Selected worker preparation
+
+FirstMate supplied these role and skill bodies before launch; this is prepared-input injection, not native OMP agent selection. Project instructions and applicable project-local skills take precedence over this selected role and shared skills. The current worker identity and task boundaries remain authoritative.
+
+## Selected role: fm-demo
+Source: /private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/roles/demo/ROLE.md
+
+---
+name: fm-demo
+description: A role
+autoloadSkills:
+  - skill-a
+---
+Role body
+
+
+## Prepared skill: skill-a
+Source: /private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/sk/skill-a/SKILL.md
+Resolve relative skill references from: /private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/sk/skill-a
+Origins: role
+
+---
+name: skill-a
+description: s
+---
+Skill A body
+
+exit 0
+-- provenance:
+{
+  "version": 1,
+  "mechanism": "firstmate-prepared-input",
+  "role": {
+    "path": "/private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/roles/demo/ROLE.md",
+    "sha256": "9af31d2b4eb9e59d131319c204418e7ea80050d70a1e9fb18df765d7c2fd887f",
+    "name": "fm-demo",
+    "associations": [
+      "skill-a"
+    ]
+  },
+  "skills": [
+    {
+      "path": "/private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/sk/skill-a/SKILL.md",
+      "sha256": "e1e11348ba3f3f9e6776b339c5ff2da1baa97571ccabb875d283e91d89a45ae3",
+      "name": "skill-a",
+      "origins": [
+        "role"
+      ]
+    }
+  ]
+}
+
+## adversarial: YAML alias binding
+error: worker preparation: /private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/roles/bad/ROLE.md: autoloadSkills must be a literal list
+exit 1
+## adversarial: traversing skill name
+error: worker preparation: /private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/tmp.ZyoWnnsSD6/roles/esc/ROLE.md: autoloadSkills contains an invalid skill name
+exit 1
