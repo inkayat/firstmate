@@ -1,0 +1,14 @@
+ok - role-associated hidden skill body reaches actual initial OMP input
+ok - removing association after scaffolding removes body at spawn
+ok - missing association refuses before any worker launch
+ok - independent and associated bodies coexist, canonical duplicate supplied once with both origins
+ok - skill example delivery and branch lines do not override the task brief contract
+ok - existing role without associations launches unchanged task
+ok - legacy no-role task still launches
+ok - Claude record-backed launch provides role and skills through executable startup context
+ok - canonical role and installed skill symlinks retain identity and deduplicate
+ok - independent selection works without guessing a role
+ok - malformed, null, alias and traversing role bindings stop before launch
+ok - unresolved selection refuses before scaffolding
+ok - failed scaffold publishes no worker selection
+not ok - no-flag rescaffold kept a stale worker selection
