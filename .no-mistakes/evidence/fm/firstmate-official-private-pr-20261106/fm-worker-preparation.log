@@ -1,0 +1,25 @@
+FM_TEST_BEGIN 2026-11-09T17:46:32Z tests/fm-worker-preparation.test.sh family=backend-dispatch expected_gate_skip=none
+ok - role-associated hidden skill body reaches actual initial OMP input
+ok - removing association after scaffolding removes body at spawn
+ok - missing association refuses before any worker launch
+ok - independent and associated bodies coexist, canonical duplicate supplied once with both origins
+ok - skill example delivery and branch lines do not override the task brief contract
+ok - existing role without associations launches unchanged task
+ok - legacy no-role task still launches
+ok - Claude record-backed launch provides role and skills through executable startup context
+ok - canonical role and installed skill symlinks retain identity and deduplicate
+ok - independent selection works without guessing a role
+ok - malformed, null, alias and traversing role bindings stop before launch
+ok - unresolved selection refuses before scaffolding
+ok - failed scaffold publishes no worker selection
+ok - no-flag rescaffold drops a previous worker selection
+ok - nonregular skill content refuses before launch
+ok - typed preparation cannot silently disappear through a custom launch command
+ok - explicit allowed roots preserve project-local source precedence and independent selection
+ok - duplicate metadata fields cannot silently override a declared association
+ok - initial input carries the context inline on tmux and names the complete context file on other backends
+FM_TEST_END 2026-11-09T17:47:19Z tests/fm-worker-preparation.test.sh exit=0 duration_ms=47361 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=47417
+FM_TEST_SUMMARY_FAMILY family=backend-dispatch count=1 duration_ms=47361 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-worker-preparation.test.sh duration_ms=47361
+bin/fm-test-run.sh tests/$t.test.sh  10.04s user 11.45s system 45% cpu 47.638 total

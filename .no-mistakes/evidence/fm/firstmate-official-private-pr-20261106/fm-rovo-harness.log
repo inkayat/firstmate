@@ -1,0 +1,19 @@
+FM_TEST_BEGIN 2026-11-09T17:49:05Z tests/fm-rovo-harness.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - rovo submits prepared context with its initial prompt rather than delaying a skill read
+ok - rovo reference copy refuses a symlinked entry before launch instead of following it
+ok - fm-spawn: rovo launches bare, waits for readiness, and delivers its brief pointer
+ok - fm-spawn: rovo omits efficiencyLevel for xhigh but keeps its allowedExternalPaths grant, recording xhigh in task metadata
+ok - fm-spawn: rovo's supported effort values merge into the same --config-override as its allowedExternalPaths grant
+ok - fm-spawn: rovo never sends the brief pointer before an observable ready signal, and tears down the created endpoint on failure
+ok - fm-spawn: rovo treats a silent pointer drop as a failed spawn, and tears down the created endpoint
+ok - fm-spawn: missing rovo executable refuses before pane creation
+ok - fm-spawn: rovo cannot be launched as a secondmate
+ok - fm-harness: rovo's markers outrank an inherited CLAUDECODE, and markerless ancestry still resolves rovo
+ok - fm-control-lib: rovo's lifecycle table matches its verified facts
+ok - busy detection: rovo's rendered busy line classifies through its own isolated fallback
+ok - busy detection: a rovo busy marker scrolled out of the tail classifies unknown, never idle
+FM_TEST_END 2026-11-09T17:49:32Z tests/fm-rovo-harness.test.sh exit=0 duration_ms=27081 gate_skip=false
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=27145
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=27081 failed=0
+FM_TEST_SLOWEST rank=1 script=tests/fm-rovo-harness.test.sh duration_ms=27081
+bin/fm-test-run.sh tests/$t.test.sh  5.43s user 7.04s system 45% cpu 27.172 total

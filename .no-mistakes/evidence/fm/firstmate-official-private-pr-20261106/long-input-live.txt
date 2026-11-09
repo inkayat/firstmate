@@ -1,0 +1,14 @@
+bounded delivery of 103992-byte first line over real tmux: sent=received identical=True (rc=0)
+herdr first line:
+{"workerContextFile":"/private/var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/fm-live.iZ6Bxj/worker-context.md","task":"Before anything else, read workerContextFile completely: it holds your worker identity and prepared role and skills. Then: Read the brief at /x/brief.md and follow it exactly."}
+baseline: unbounded single send-keys of the same line -> tmux 'command too long'
+--- rovo reference copies
+data/t/out.md
+data/t/sel.json
+--- rovo reference copies (live prepare --reference-copies)
+data/t/out.md
+data/t/prov.json
+data/t/sel.json
+data/t/worker-skills/foo/SKILL.md
+data/t/worker-skills/foo/refs/a.md
+7:Resolve relative skill references from: /var/folders/x6/bsp0vly53_d039y4d9ydmw0w0000gn/T/fm-live.iZ6Bxj/data/t/worker-skills/foo
