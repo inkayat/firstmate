@@ -1,0 +1,8 @@
+## OLD lib (base commit): single send-keys -l of 49001 chars
+command too long
+old send rc=1
+received bytes after old:        0
+## NEW lib: fm_tmux_send_literal_bounded on a real tmux pane (49001 chars)
+new send rc=0
+expected bytes=   63002 received=   63002
+BYTE-EXACT MATCH
