@@ -1276,21 +1276,20 @@ SH
 #!/usr/bin/env bash
 printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 started="watcher: started pid=$$ (beacon fresh) recovery-generation=gen-$$"
-hosts=$(grep -c '^host=' "$FM_ARM_LOG")
-case "$hosts" in
-  1)
-    printf '%s\n' "$started"
-    sleep 1
-    printf 'signal: omp-host first\n'
-    exit 0
-    ;;
-  2)
-    printf '%s\nsignal: omp-host second\n' "$started"
-    sleep 1
-    printf 'supervision-host: outcome 2 for demo [captain]: fixture split\n'
-    exit 0
-    ;;
-esac
+hosts=
+while IFS= read -r _; do hosts="$hosts."; done < "$FM_ARM_LOG"
+if [ "$hosts" = . ]; then
+  printf '%s\n' "$started"
+  sleep 1
+  printf 'signal: omp-host first\n'
+  exit 0
+fi
+if [ "$hosts" = .. ]; then
+  printf '%s\nsignal: omp-host second\n' "$started"
+  sleep 1
+  printf 'supervision-host: outcome 2 for demo [captain]: fixture split\n'
+  exit 0
+fi
 printf '%s\n' "$started"
 sleep 30
 SH
