@@ -29,7 +29,8 @@
 #   6. The turn-end guard extension compels one continuation on exit 2 and
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
-#      actionable close as one follow-up.
+#      actionable close as one follow-up; on a first process start it arms the
+#      initial cycle itself, exactly once, after its own startup took the lock.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -771,6 +772,277 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+# Both tracked extensions over one fake omp, shaped like omp's own extension
+# host: one API object per extension sharing a single events bus, and each
+# lifecycle event dispatched to one extension handler at a time in discovery
+# order, awaited. The turn-end guard's startup child is a fixture that takes the
+# lock (or does not) only after session_start returned, as the real
+# bin/fm-session-start.sh does on a first process start.
+write_omp_pair_fixture() {  # <repo>
+  local repo=$1
+  install_omp_extension_fixture "$repo"
+  cat > "$repo/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+state="${FM_HOME:?}/state"
+case "${FM_TEST_STARTUP:?}" in
+  own) sleep 0.3; printf '%s\n' "$FM_TEST_OMP_PID" > "$state/.lock" ;;
+  own-early) printf '%s\n' "$FM_TEST_OMP_PID" > "$state/.lock"; sleep 1 ;;
+  foreign) sleep 0.3; printf '%s\n' "$FM_TEST_FOREIGN_PID" > "$state/.lock" ;;
+  unreadable) sleep 0.3; mkdir "$state/.lock" ;;
+  none) sleep 0.3 ;;
+esac
+printf 'startup-settled source=%s\n' "$2" >> "${FM_ARM_LOG:?}"
+printf 'SESSION START - fixture digest\n'
+SH
+  # hold: a cycle that stays up. fail: a cycle that dies at once. note: the
+  # first two cycles each close on the next queued wake row, the way the
+  # watcher closes on a queued inbox note; later successors hold.
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = --handling-delivered ] && exit 0
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+started="watcher: started pid=$$ (beacon fresh) recovery-generation=gen-$$"
+case "${FM_TEST_ARM:-hold}" in
+  fail) exit 1 ;;
+  note)
+    fired=0
+    [ -e "$FM_ARM_LOG.fired" ] && fired=$(wc -l < "$FM_ARM_LOG.fired")
+    if [ "$fired" -lt 2 ]; then
+      printf '%s\n' "$started"
+      i=0
+      while [ "$i" -lt 100 ] && [ "$(cat "$FM_HOME/state/.wake-queue" 2>/dev/null | wc -l)" -le "$fired" ]; do sleep 0.1; i=$((i + 1)); done
+      printf 'fired\n' >> "$FM_ARM_LOG.fired"
+      awk -F '\t' -v n="$((fired + 1))" 'NR == n { print $5 }' "$FM_HOME/state/.wake-queue"
+      exit 0
+    fi
+    ;;
+esac
+printf '%s\n' "$started"
+exec sleep 30
+SH
+  chmod +x "$repo/bin/fm-sessionstart-run.sh" "$repo/bin/fm-watch-arm.sh"
+  cat > "$repo/omp-pair-host.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+export const lines = () => existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n") : [];
+export const arms = () => lines().filter((row) => row.startsWith("arm=")).length;
+export const settled = () => lines().filter((row) => row.startsWith("startup-settled")).length;
+export async function until(predicate, ms = 5000) {
+  for (let waited = 0; waited < ms && !predicate(); waited += 50) await sleep(50);
+  return predicate();
+}
+export async function loadPair(repo) {
+  process.env.FM_TEST_OMP_PID = String(process.pid);
+  const channels = new Map();
+  const events = {
+    on(channel, handler) {
+      if (!channels.has(channel)) channels.set(channel, new Set());
+      channels.get(channel).add(handler);
+    },
+    emit(channel, data) {
+      for (const handler of channels.get(channel) ?? []) handler(data);
+    },
+  };
+  const sent = [];
+  const hosts = [];
+  let tool = null;
+  for (const file of ["fm-primary-omp-watch.ts", "fm-primary-turnend-guard.ts"]) {
+    const handlers = new Map();
+    const pi = {
+      events,
+      on(event, handler) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
+      registerCommand() {},
+      registerTool(registered) { tool = registered; },
+      sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+      sendMessage() {},
+    };
+    const mod = await import(pathToFileURL(`${repo}/.omp/extensions/${file}`).href);
+    mod.default(pi);
+    hosts.push(handlers);
+  }
+  const emit = async (name, event, ctx) => {
+    for (const handlers of hosts) for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
+  };
+  // omp's ctx.isIdle() is !session.isStreaming: true while main runs no turn.
+  let idle = true;
+  const ctx = { isIdle: () => idle, sessionManager: { getSessionId: () => "fixture-session" } };
+  return {
+    sent,
+    setIdle: (value) => { idle = value; },
+    arm: async () => (await tool.execute()).content[0].text,
+    start: () => emit("session_start", { type: "session_start" }, ctx),
+    consume: (prompt) => emit("before_agent_start", { type: "before_agent_start", prompt }, ctx),
+    shutdown: () => Promise.all(hosts.flatMap((handlers) => (handlers.get("session_shutdown") ?? []).map((handler) => handler({}, ctx)))),
+  };
+}
+JS
+}
+
+run_omp_pair() {  # <case-dir> <env assignments...> -- node script on stdin
+  local dir=$1; shift
+  local assignments=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do assignments+=("$1"); shift; done
+  mkdir -p "$dir/home/state"
+  env -u FM_TASK_ID -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/repo" FM_ARM_LOG="$dir/arm.log" \
+    REPO="$dir/repo" FM_INBOX="$ROOT/bin/fm-inbox.sh" "${assignments[@]}" node --input-type=module 2>&1
+}
+
+# The reported first-start failure: session_start checks ownership before the
+# sibling startup child took the lock, so nothing armed and a queued note never
+# woke an idle supervisor with no tasks. The extension now arms once its own
+# startup settles with this session owning the lock: no model turn, no
+# fm_watch_arm_omp call, and a later call is an ownership no-op.
+test_watch_extension_arms_once_its_own_startup_takes_the_lock() {
+  local base="$TMP_ROOT/initial-arm" dir out status mode
+  dir="$base/delayed"; write_omp_pair_fixture "$dir/repo"
+  out=$(run_omp_pair "$dir" FM_TEST_STARTUP=own -- <<'EOF'
+import { existsSync } from "node:fs";
+const { loadPair, arms, until, sleep } = await import(`${process.env.REPO}/omp-pair-host.mjs`);
+const pair = await loadPair(process.env.REPO);
+await pair.start();
+if (existsSync(`${process.env.FM_HOME}/state/.lock`)) throw new Error("fixture invalid: the lock existed before session_start returned");
+if (!(await until(() => arms() > 0))) throw new Error("the initial cycle never armed after startup of this session took the lock");
+await sleep(500);
+if (arms() !== 1) throw new Error(`the initial cycle must arm exactly once, saw ${arms()} launches`);
+const manual = await pair.arm();
+if (!/^watcher: unchanged - omp extension already owns an arm child/.test(manual)) throw new Error(`the required fm_watch_arm_omp call was not an ownership no-op: ${manual}`);
+if (arms() !== 1 || pair.sent.length !== 0) throw new Error(`unexpected launches or messages: ${arms()} ${JSON.stringify(pair.sent)}`);
+await pair.shutdown();
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp initial arm after delayed ownership: $out"
+  [ -z "$out" ] || fail "omp initial arm test printed output: $out"
+
+  dir="$base/note"; write_omp_pair_fixture "$dir/repo"
+  out=$(run_omp_pair "$dir" FM_TEST_STARTUP=own FM_TEST_ARM=note -- <<'EOF'
+import { spawnSync } from "node:child_process";
+import { readFileSync, existsSync } from "node:fs";
+const { loadPair, arms, until, sleep } = await import(`${process.env.REPO}/omp-pair-host.mjs`);
+const pair = await loadPair(process.env.REPO);
+await pair.start();
+if (!(await until(() => arms() === 1))) throw new Error("the initial cycle never armed with zero tasks");
+// The real capture path an Inbox answer or screenshot note takes.
+const { FM_ROOT_OVERRIDE: _fixtureRoot, ...noteEnv } = process.env;
+const note = spawnSync("bash", [process.env.FM_INBOX, "note", "--request-id", "chat-7", "screenshot answer from the Inbox"], { encoding: "utf8", env: noteEnv });
+if (note.status !== 0) throw new Error(`fm-inbox.sh note failed: ${note.stderr}`);
+const id = note.stdout.match(/^queued (\S+)/m)?.[1];
+if (!id) throw new Error(`no note id: ${note.stdout}`);
+if (!(await until(() => pair.sent.length > 0, 8000))) throw new Error("the queued note never reached the idle main session");
+await sleep(500);
+if (pair.sent.length !== 1) throw new Error(`expected one follow-up, saw ${JSON.stringify(pair.sent)}`);
+if (!pair.sent[0].m.includes(`FIRSTMATE WATCHER WAKE: check: captain inbox note ${id} - screenshot answer from the Inbox`)) throw new Error(`unexpected wake: ${pair.sent[0].m}`);
+// The omp deliverAs "followUp" only queues behind the current run, so an idle
+// main (here with zero prior turns) would never start a turn. The idle wake
+// must go out without deliverAs, which is what makes omp prompt the model.
+if (pair.sent[0].o?.deliverAs !== undefined) throw new Error(`the wake of an idle main must start a turn, not queue as ${JSON.stringify(pair.sent[0].o)}`);
+if (!readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8").includes(`inbox:${id}`)) throw new Error("delivery must leave the durable wake row for the drain by main");
+await pair.consume(pair.sent[0].m);
+// A main that is streaming keeps the queued follow-up: the wake must not
+// interrupt the running turn or start a second one.
+pair.setIdle(false);
+const busy = spawnSync("bash", [process.env.FM_INBOX, "note", "--request-id", "chat-8", "second answer while main works"], { encoding: "utf8", env: noteEnv });
+if (busy.status !== 0) throw new Error(`fm-inbox.sh note failed: ${busy.stderr}`);
+const busyId = busy.stdout.match(/^queued (\S+)/m)?.[1];
+if (!busyId) throw new Error(`no note id: ${busy.stdout}`);
+if (!(await until(() => pair.sent.length > 1, 8000))) throw new Error("the note queued while main was busy never reached the session");
+await sleep(500);
+if (pair.sent.length !== 2) throw new Error(`expected two wakes in total, saw ${JSON.stringify(pair.sent)}`);
+if (!pair.sent[1].m.includes(`check: captain inbox note ${busyId} - second answer while main works`)) throw new Error(`unexpected busy wake: ${pair.sent[1].m}`);
+if (pair.sent[1].o?.deliverAs !== "followUp") throw new Error(`the wake of a busy main must stay a queued follow-up, saw ${JSON.stringify(pair.sent[1].o)}`);
+await pair.consume(pair.sent[1].m);
+await pair.shutdown();
+if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp initial arm delivers a zero-task note: $out"
+  [ -z "$out" ] || fail "omp initial arm note test printed output: $out"
+
+  for mode in foreign none unreadable; do
+    dir="$base/$mode"; write_omp_pair_fixture "$dir/repo"
+    out=$(run_omp_pair "$dir" FM_TEST_STARTUP="$mode" CASE="$mode" -- <<'EOF'
+import { spawn } from "node:child_process";
+const { loadPair, arms, settled, until, sleep } = await import(`${process.env.REPO}/omp-pair-host.mjs`);
+const foreign = spawn("sleep", ["30"], { stdio: "ignore" });
+process.env.FM_TEST_FOREIGN_PID = String(foreign.pid);
+const pair = await loadPair(process.env.REPO);
+await pair.start();
+if (!(await until(() => settled() === 1))) throw new Error("fixture startup never settled");
+await sleep(500);
+if (arms() !== 0) throw new Error(`${process.env.CASE}: armed without verified ownership (${arms()} launches)`);
+const manual = await pair.arm();
+const expected = process.env.CASE === "foreign" ? /^watcher: read-only - session lock is held by another firstmate session/ : /^watcher: not armed - no live session holds the lock/;
+if (!expected.test(manual)) throw new Error(`${process.env.CASE}: unexpected arm answer: ${manual}`);
+if (arms() !== 0) throw new Error(`${process.env.CASE}: armed after the refusal`);
+await pair.shutdown();
+foreign.kill();
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp initial arm refuses ($mode lock): $out"
+    [ -z "$out" ] || fail "omp initial arm refusal test ($mode) printed output: $out"
+  done
+
+  dir="$base/replaced"; write_omp_pair_fixture "$dir/repo"
+  out=$(run_omp_pair "$dir" FM_TEST_STARTUP=own-early -- <<'EOF'
+import { existsSync } from "node:fs";
+const { loadPair, arms, settled, until, sleep } = await import(`${process.env.REPO}/omp-pair-host.mjs`);
+const pair = await loadPair(process.env.REPO);
+await pair.start();
+if (!(await until(() => existsSync(`${process.env.FM_HOME}/state/.lock`)))) throw new Error("fixture startup never took the lock");
+if (arms() !== 0) throw new Error("fixture invalid: armed before the startup settled");
+// Shut down while the startup that took the lock is still running.
+await pair.shutdown();
+await sleep(1500);
+if (arms() !== 0 || settled() !== 0) throw new Error(`a cancelled startup armed a stopped generation (${arms()} launches, ${settled()} settled)`);
+// The in-process replacement owns the lock at session_start and arms there;
+// its own startup settling afterwards adds nothing.
+await pair.start();
+if (!(await until(() => arms() === 1, 2000))) throw new Error("the owning replacement did not arm at session_start");
+if (!(await until(() => settled() === 1))) throw new Error("the replacement startup never settled");
+await sleep(500);
+if (arms() !== 1) throw new Error(`the replacement armed ${arms()} times`);
+await pair.shutdown();
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp initial arm across a cancelled startup and replacement: $out"
+  [ -z "$out" ] || fail "omp initial arm replacement test printed output: $out"
+
+  # The model's call landing first: an arm it started (holding, or exhausted
+  # after its bounded retries and handed back to main) is never relaunched when
+  # the startup settles afterwards.
+  for mode in hold:1 fail:2; do
+    dir="$base/manual-${mode%%:*}"; write_omp_pair_fixture "$dir/repo"
+    out=$(run_omp_pair "$dir" FM_TEST_STARTUP=own-early FM_TEST_ARM="${mode%%:*}" EXPECT="${mode##*:}" \
+      FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 -- <<'EOF'
+import { existsSync } from "node:fs";
+const { loadPair, arms, settled, until, sleep } = await import(`${process.env.REPO}/omp-pair-host.mjs`);
+const pair = await loadPair(process.env.REPO);
+await pair.start();
+if (!(await until(() => existsSync(`${process.env.FM_HOME}/state/.lock`)))) throw new Error("fixture startup never took the lock");
+const manual = await pair.arm();
+if (!/^watcher: started omp extension arm child 1;/.test(manual)) throw new Error(`the manual arm did not start: ${manual}`);
+if (!(await until(() => settled() === 1))) throw new Error("fixture startup never settled");
+await sleep(700);
+if (arms() !== Number(process.env.EXPECT)) throw new Error(`${process.env.FM_TEST_ARM}: expected ${process.env.EXPECT} launches, saw ${arms()}`);
+await pair.shutdown();
+process.exit(0);
+EOF
+)
+    status=$?
+    expect_code 0 "$status" "omp initial arm after a manual arm (${mode%%:*}): $out"
+    [ -z "$out" ] || fail "omp initial arm manual overlap test (${mode%%:*}) printed output: $out"
+  done
+  pass ".omp watch extension: the first process start arms once after its own startup takes the lock, delivers a zero-task note, and never arms for another owner, a missing or unreadable lock, a cancelled startup, or past a manual arm"
+}
+
 # An opted-in home spawns the supervision host in the arm's place; its streamed
 # status line drives readiness and the handling handoff, and a handed-back
 # wake is delivered with every host line and the away note.
@@ -1004,20 +1276,20 @@ SH
 #!/usr/bin/env bash
 printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 started="watcher: started pid=$$ (beacon fresh) recovery-generation=gen-$$"
-case "$(grep -c '^host=' "$FM_ARM_LOG")" in
-  1)
-    printf '%s\n' "$started"
-    sleep 1
-    printf 'signal: omp-host first\n'
-    exit 0
-    ;;
-  2)
-    printf '%s\nsignal: omp-host second\n' "$started"
-    sleep 1
-    printf 'supervision-host: outcome 2 for demo [captain]: fixture split\n'
-    exit 0
-    ;;
-esac
+hosts=
+while IFS= read -r _; do hosts="$hosts."; done < "$FM_ARM_LOG"
+if [ "$hosts" = . ]; then
+  printf '%s\n' "$started"
+  sleep 1
+  printf 'signal: omp-host first\n'
+  exit 0
+fi
+if [ "$hosts" = .. ]; then
+  printf '%s\nsignal: omp-host second\n' "$started"
+  sleep 1
+  printf 'supervision-host: outcome 2 for demo [captain]: fixture split\n'
+  exit 0
+fi
 printf '%s\n' "$started"
 sleep 30
 SH
@@ -1069,6 +1341,7 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_arms_once_its_own_startup_takes_the_lock
 test_watch_extension_runs_the_supervision_host
 test_watch_extension_runs_the_supervision_host quiet
 test_watch_extension_keeps_the_arm_without_the_file_or_with_off

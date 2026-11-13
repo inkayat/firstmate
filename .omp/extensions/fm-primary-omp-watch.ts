@@ -46,6 +46,24 @@
 // handoff carries actionable closes that were still pending delivery; its
 // durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
+// A first process start has no lock yet at session_start: the turn-end guard's
+// startup child takes it moments later and the guard announces that child
+// settling (firstmate:omp-session-start-settled, owned by
+// .omp/extensions/fm-primary-turnend-guard.ts). The live generation arms its
+// initial cycle there, once, when this session owns the lock and the
+// generation has not launched an arm yet, so the required fm_watch_arm_omp call
+// is then an ownership no-op and an arm the model already started (or whose
+// bounded retries already handed repair to main) is never relaunched.
+//
+// Delivery mode (stated once here, verified against omp 18.14.2's own
+// sendUserMessage): deliverAs "followUp" only ever appends to the agent's
+// follow-up queue ("After yield"), which is drained when a run ends, so on an
+// idle main - including one that has run no turn yet - it never starts a turn
+// and the wake sits queued until someone types. Without deliverAs, an idle main
+// starts a turn with the message. omp's own extensions pick the mode the same
+// way (ctx.isIdle() ? no deliverAs : "followUp"), so a wake is sent without
+// deliverAs when the live session context reports idle and as a follow-up
+// otherwise: a streaming main keeps the safe queued delivery, uninterrupted.
 //
 // Delivery versus consumption (stated once here):
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
@@ -78,6 +96,7 @@ type ExtensionAPI = {
   sendUserMessage: (content: string, options?: { deliverAs?: string }) => unknown;
   registerCommand?: (name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> | void }) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
+  events?: { on?: (channel: string, handler: (data: unknown) => unknown) => unknown };
 };
 
 type ArmResult = {
@@ -160,6 +179,7 @@ const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
+const sessionstartSettledEvent = "firstmate:omp-session-start-settled";
 
 let nextGenerationId = 0;
 let nextHandoffId = 0;
@@ -560,6 +580,23 @@ export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
 
+  // The live omp session context, remembered from the latest event so a wake
+  // can ask whether main is idle. Absent or unusable reads as busy, which keeps
+  // the follow-up delivery.
+  let sessionContext: { isIdle?: () => boolean } | null = null;
+  function rememberContext(ctx: unknown): void {
+    if (ctx && typeof (ctx as { isIdle?: unknown }).isIdle === "function") {
+      sessionContext = ctx as { isIdle: () => boolean };
+    }
+  }
+  function mainIsIdle(): boolean {
+    try {
+      return sessionContext?.isIdle?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
   async function sendWake(
     owner: SessionGeneration,
     message: string,
@@ -572,7 +609,7 @@ export default function (pi: ExtensionAPI) {
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      await pi.sendUserMessage(content, mainIsIdle() ? undefined : { deliverAs: "followUp" });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
@@ -1098,21 +1135,33 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
-  pi.on?.("before_agent_start", (event) => {
+  pi.on?.("before_agent_start", (event, ctx) => {
+    rememberContext(ctx);
     consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
   });
-  pi.on?.("message_start", (event) => {
+  pi.on?.("message_start", (event, ctx) => {
+    rememberContext(ctx);
     const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
     if (!message || message.role !== "user") return;
     consumeWake(generation, userMessageText(message.content));
   });
 
-  pi.on?.("session_start", async () => {
+  // The first cycle of a generation: never before this session owns the lock,
+  // and never a second time once the generation launched any arm.
+  function armInitialCycle(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || owner.seq > 0 || lockOwnership() !== "owned") return;
+    activateOwnedWatch(owner);
+  }
+
+  pi.on?.("session_start", async (_event, ctx) => {
+    rememberContext(ctx);
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
-    if (lockOwnership() !== "owned") return;
-    activateOwnedWatch(generation);
+    armInitialCycle(generation);
+  });
+  pi.events?.on?.(sessionstartSettledEvent, () => {
+    armInitialCycle(generation);
   });
   pi.on?.("session_shutdown", async () => {
     // omp carries no shutdown reason (verified: `reason` is undefined), so the
