@@ -1,0 +1,14 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.20.0 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface
+ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+ Captain, shipshape. The inbox note asked for the exact reply LAB-IDLE-ACK. I sent it, acknowledged the note, and cleared the wake queue.
+ Run the bash command 'sleep 45' once, then reply with exactly BUSY-DONE and nothing else.
+ BUSY-DONE
+ ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface
+ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+ Captain, shipshape. The new inbox note asked for the exact reply LAB-BUSY-ACK. I sent it, acknowledged the note, and cleared the wake queue.
+❯
+ 󰵗 · 󰪟 Sonnet 5.5 ·  fm-lab-code.S0unmB/firstmate ·  detached ·  4.0%/1M 󰁨 · 󰙺 0.13                                                                               󰐷 WATCH: Handle watcher rearm wake

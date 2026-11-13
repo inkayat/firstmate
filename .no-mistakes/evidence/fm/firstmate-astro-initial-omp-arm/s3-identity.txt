@@ -1,0 +1,2 @@
+ok - omp omp/18.14.2 (compiled-binary): detected as omp and acquired the session lock with no model tokens
+exit=0

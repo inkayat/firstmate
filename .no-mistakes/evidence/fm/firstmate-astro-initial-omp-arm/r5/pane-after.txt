@@ -1,0 +1,17 @@
+                                                                                    ████████████
+                                                                                       ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                                                                       ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                                                                       ▒▒  ██                  █
+                                                                                           ██       v18.14.2
+                                                                 Tip: Start your prompt with `$ ` to run Python — `$$ ` runs it without
+                                                                                      adding the output to context
+ Ponytail loaded: off
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.20.0 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface
+ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+ Captain, shipshape. The inbox note asked for the exact reply LAB-IDLE-ACK. I sent it, acknowledged the note, and cleared the wake queue.
+❯
+ 󰵗 · 󰪟 Sonnet 5.5 ·  fm-lab-code.S0unmB/firstmate ·  detached ·  3.9%/1M 󰁨 · 󰙺 0.10                                                                               󰐷 WATCH: Handle watcher rearm wake

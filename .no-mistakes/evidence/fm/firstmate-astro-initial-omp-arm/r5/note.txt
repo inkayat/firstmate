@@ -1,0 +1,3 @@
+queued 1794578551-H3DqA0
+  Synthetic lab note. Reply to this note id with exactly LAB-IDLE-ACK using bin/fm-inbox.sh reply, ack
+  firstmate will pick this up at its next check.

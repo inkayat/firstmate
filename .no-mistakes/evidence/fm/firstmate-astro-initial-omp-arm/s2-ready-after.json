@@ -1,0 +1,1 @@
+{"schema":"fm-primary-ready.v1","home":"tmp/fm-lab.WnczBz","observed_at":"2026-11-13T13:28:29Z","lock":{"state":"held","pid":950756,"live_harness":true},"wake_consumer":{"state":"healthy","reason":"supervised","beacon_age_seconds":14},"posture":{"state":"present"},"can_receive":true}

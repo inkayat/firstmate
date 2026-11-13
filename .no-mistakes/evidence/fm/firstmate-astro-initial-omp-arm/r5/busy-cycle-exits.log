@@ -1,0 +1,2 @@
+arm_pid=2207267	watcher_pid=2207318	origin=started	started_at=1794578503	ended_at=1794578563	exit_code=0	signal=none	reason=actionable-check	beacon_age=0	lock_before=pid:2207318|identity:linux-startti
+arm_pid=2234471	watcher_pid=2234493	origin=started	started_at=1794578563	ended_at=1794578624	exit_code=0	signal=none	reason=actionable-check	beacon_age=0	lock_before=pid:2234493|identity:linux-startti

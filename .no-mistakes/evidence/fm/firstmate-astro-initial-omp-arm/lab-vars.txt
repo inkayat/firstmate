@@ -1,0 +1,1 @@
+LAB=/tmp/fm-lab.qJdmpY TMUXD=/tmp/fml.tphLDV CODE=/tmp/fm-lab-code.XB9YML/firstmate

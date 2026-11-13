@@ -1,0 +1,15 @@
+ok - snippets preserve literal ampersands, quotes and spaces in paths across primary harnesses
+ok - renderer adds the supervision-host protocol on a claude home unless config/supervision-host-off opts it out, leaving the claude block intact
+ok - renderer gives each non-Pi arm owner the host protocol in its own terms, and grok arms the host
+ok - renderer prints exactly the selected harness block
+ok - renderer falls back to unknown.md for unverified harness names
+ok - renderer includes read-only, afk, and effective x-mode current-state stanzas
+ok - renderer's away/quiet stanzas are mode-aware, default to away, and fall back safely on garbage input
+ok - renderer repair-line mode is harness-aware and honors conditional state
+ok - omp restart guidance names the fm launcher only when the home is not the checkout
+ok - renderer preserves every harness ordinary-continuation and missing-cycle repair path
+ok - a parked codex session's ordinary-wake line names the Stop hook and never the foreground checkpoint
+ok - pi-signed keeps its identity while sharing Pi's supervision protocol
+ok - grok supervision is Claude-shaped background notify with passive Stop-hook backstop
+ok - grok rendered command sources the effective x-mode config
+ok - pi supervision snippet renders the effective extension path

@@ -1,0 +1,18 @@
+                                                                                    ████████████
+                                                                                       ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                                                                       ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                                                                       ▒▒  ██                  █
+                                                                                           ██       v18.14.2
+                                                                 Tip: Pair up live: `/collab` shares your session through an end-to-end
+                                                                  encrypted relay link — a teammate runs `/join <link>` to watch tool
+                                                                          calls stream and prompt the agent from their own omp
+ Ponytail loaded: off
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.20.0 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ After yield · 1
+   1. ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface ↵  ↵ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+   └ Alt+↑ to edit
+❯
+ 󰵗 · 󰪟 Sonnet 5.5 ·  fm-lab-code.QH0yX3/firstmate ·  detached ·  3.3%/1M 󰁨 · 󰙺

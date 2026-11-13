@@ -1,0 +1,1 @@
+LAB=/tmp/fm-lab.NKDKnt TMUXD=/tmp/fml.kGsFIm CODE=/tmp/fm-lab-code.S0unmB/firstmate

@@ -1,0 +1,50 @@
+
+                                                                                    ████████████
+                                                                                       ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                                                                       ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                                                                       ▒▒  ██                  █
+                                                                                           ██       v18.14.2
+
+                                                                   Tip: Find out which model you emotionally abuse the most with `omp
+                                                                                                 stats`
+
+ Ponytail loaded: off
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.20.0 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface
+
+ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+
+
+ Captain, shipshape.
+
+❯
+ 󰵗 · 󰪟 Sonnet 5.5 ·  fm-lab-code.xBKVwe/firstmate ·  detached *2 ·  3.9%/1M 󰁨 · 󰙺 0.13                                                                            󰐷 WATCH: Handle watcher rearm wake
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

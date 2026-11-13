@@ -1,0 +1,16 @@
+                                                                                    ████████████
+                                                                                       ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                                                                       ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                                                                       ▒▒  ██                  █
+                                                                                           ██       v18.14.2
+                                                                            Tip: Spaghetti code? Try complaining with /omfg
+ Ponytail loaded: off
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.20.0 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ After yield · 1
+   1. ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface ↵  ↵ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+   └ Alt+↑ to edit
+❯
+ 󰵗 · 󰪟 GPT-6 Astra ·  fm-lab-code.zoYnkQ/firstmate ·  detached ·  2.2%/922K 󰁨

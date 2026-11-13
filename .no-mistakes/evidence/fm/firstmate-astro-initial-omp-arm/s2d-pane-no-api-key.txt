@@ -1,0 +1,50 @@
+
+                                                                                    ████████████
+                                                                                       ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                                                                       ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                                                                       ▒▒  ██                  █
+                                                                                           ██       v18.14.2
+
+                                                                Tip: Press ← ← to drill into a running or finished agent and inspect its
+                                                                                       tool calls and transcript
+
+ Ponytail loaded: off
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.20.0 is available. Run: omp update
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+ Reply with exactly PRE-TURN-OK and do nothing else.
+
+
+ Error: No API key found for openai-codex.
+
+ Use /login, set an API key environment variable, or create ~/.omp/agent/agent.db
+
+❯
+ 󰵗 · 󰪟 GPT-6 Astra ·  fm-lab-code.QH0yX3/firstmate ·  detached ·  2.2%/922K 󰁨
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

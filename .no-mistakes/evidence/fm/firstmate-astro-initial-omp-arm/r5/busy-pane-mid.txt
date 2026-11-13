@@ -1,0 +1,8 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: rearm-resurface
+ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+ Captain, shipshape. The inbox note asked for the exact reply LAB-IDLE-ACK. I sent it, acknowledged the note, and cleared the wake queue.
+ Run the bash command 'sleep 45' once, then reply with exactly BUSY-DONE and nothing else.
+  󱊷 Sleeping 45 seconds
+❯
+ ⠋ 11s · 󰪟 Sonnet 5.5 ·  fm-lab-code.S0unmB/firstmate ·  detached ·  3.9%/1M 󰁨 · 󰙺 0.11                                                                           󰐷 WATCH: Handle watcher rearm wake
