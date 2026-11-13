@@ -795,8 +795,8 @@ printf 'startup-settled source=%s\n' "$2" >> "${FM_ARM_LOG:?}"
 printf 'SESSION START - fixture digest\n'
 SH
   # hold: a cycle that stays up. fail: a cycle that dies at once. note: the
-  # first cycle closes on the first queued wake row, the way the watcher closes
-  # on a queued inbox note; its successors hold.
+  # first two cycles each close on the next queued wake row, the way the
+  # watcher closes on a queued inbox note; later successors hold.
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = --handling-delivered ] && exit 0
@@ -805,12 +805,14 @@ started="watcher: started pid=$$ (beacon fresh) recovery-generation=gen-$$"
 case "${FM_TEST_ARM:-hold}" in
   fail) exit 1 ;;
   note)
-    if [ ! -e "$FM_ARM_LOG.fired" ]; then
+    fired=0
+    [ -e "$FM_ARM_LOG.fired" ] && fired=$(wc -l < "$FM_ARM_LOG.fired")
+    if [ "$fired" -lt 2 ]; then
       printf '%s\n' "$started"
       i=0
-      while [ "$i" -lt 100 ] && [ ! -s "$FM_HOME/state/.wake-queue" ]; do sleep 0.1; i=$((i + 1)); done
-      : > "$FM_ARM_LOG.fired"
-      awk -F '\t' 'NR == 1 { print $5 }' "$FM_HOME/state/.wake-queue"
+      while [ "$i" -lt 100 ] && [ "$(cat "$FM_HOME/state/.wake-queue" 2>/dev/null | wc -l)" -le "$fired" ]; do sleep 0.1; i=$((i + 1)); done
+      printf 'fired\n' >> "$FM_ARM_LOG.fired"
+      awk -F '\t' -v n="$((fired + 1))" 'NR == n { print $5 }' "$FM_HOME/state/.wake-queue"
       exit 0
     fi
     ;;
@@ -862,9 +864,12 @@ export async function loadPair(repo) {
   const emit = async (name, event, ctx) => {
     for (const handlers of hosts) for (const handler of handlers.get(name) ?? []) await handler(event, ctx);
   };
-  const ctx = { sessionManager: { getSessionId: () => "fixture-session" } };
+  // omp's ctx.isIdle() is !session.isStreaming: true while main runs no turn.
+  let idle = true;
+  const ctx = { isIdle: () => idle, sessionManager: { getSessionId: () => "fixture-session" } };
   return {
     sent,
+    setIdle: (value) => { idle = value; },
     arm: async () => (await tool.execute()).content[0].text,
     start: () => emit("session_start", { type: "session_start" }, ctx),
     consume: (prompt) => emit("before_agent_start", { type: "before_agent_start", prompt }, ctx),
@@ -929,9 +934,25 @@ if (!(await until(() => pair.sent.length > 0, 8000))) throw new Error("the queue
 await sleep(500);
 if (pair.sent.length !== 1) throw new Error(`expected one follow-up, saw ${JSON.stringify(pair.sent)}`);
 if (!pair.sent[0].m.includes(`FIRSTMATE WATCHER WAKE: check: captain inbox note ${id} - screenshot answer from the Inbox`)) throw new Error(`unexpected wake: ${pair.sent[0].m}`);
-if (pair.sent[0].o?.deliverAs !== "followUp") throw new Error("the wake must be delivered as a follow-up");
+// omp's deliverAs "followUp" only queues behind the current run, so an idle
+// main (here with zero prior turns) would never start a turn. The idle wake
+// must go out without deliverAs, which is what makes omp prompt the model.
+if (pair.sent[0].o?.deliverAs !== undefined) throw new Error(`an idle main's wake must start a turn, not queue as ${JSON.stringify(pair.sent[0].o)}`);
 if (!readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8").includes(`inbox:${id}`)) throw new Error("delivery must leave the durable wake row for main's drain");
 await pair.consume(pair.sent[0].m);
+// A main that is streaming keeps the queued follow-up: the wake must not
+// interrupt the running turn or start a second one.
+pair.setIdle(false);
+const busy = spawnSync("bash", [process.env.FM_INBOX, "note", "--request-id", "chat-8", "second answer while main works"], { encoding: "utf8", env: noteEnv });
+if (busy.status !== 0) throw new Error(`fm-inbox.sh note failed: ${busy.stderr}`);
+const busyId = busy.stdout.match(/^queued (\S+)/m)?.[1];
+if (!busyId) throw new Error(`no note id: ${busy.stdout}`);
+if (!(await until(() => pair.sent.length > 1, 8000))) throw new Error("the note queued while main was busy never reached the session");
+await sleep(500);
+if (pair.sent.length !== 2) throw new Error(`expected two wakes in total, saw ${JSON.stringify(pair.sent)}`);
+if (!pair.sent[1].m.includes(`check: captain inbox note ${busyId} - second answer while main works`)) throw new Error(`unexpected busy wake: ${pair.sent[1].m}`);
+if (pair.sent[1].o?.deliverAs !== "followUp") throw new Error(`a busy main's wake must stay a queued follow-up, saw ${JSON.stringify(pair.sent[1].o)}`);
+await pair.consume(pair.sent[1].m);
 await pair.shutdown();
 if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
 process.exit(0);

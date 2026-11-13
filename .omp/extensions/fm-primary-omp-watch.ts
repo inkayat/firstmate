@@ -55,6 +55,16 @@
 // is then an ownership no-op and an arm the model already started (or whose
 // bounded retries already handed repair to main) is never relaunched.
 //
+// Delivery mode (stated once here, verified against omp 18.14.2's own
+// sendUserMessage): deliverAs "followUp" only ever appends to the agent's
+// follow-up queue ("After yield"), which is drained when a run ends, so on an
+// idle main - including one that has run no turn yet - it never starts a turn
+// and the wake sits queued until someone types. Without deliverAs, an idle main
+// starts a turn with the message. omp's own extensions pick the mode the same
+// way (ctx.isIdle() ? no deliverAs : "followUp"), so a wake is sent without
+// deliverAs when the live session context reports idle and as a follow-up
+// otherwise: a streaming main keeps the safe queued delivery, uninterrupted.
+//
 // Delivery versus consumption (stated once here):
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
 // The successor pipeline never waits for the model to read it: a follow-up
@@ -570,6 +580,23 @@ export default function (pi: ExtensionAPI) {
   let generation = createGeneration();
   activateGeneration(generation);
 
+  // The live omp session context, remembered from the latest event so a wake
+  // can ask whether main is idle. Absent or unusable reads as busy, which keeps
+  // the follow-up delivery.
+  let sessionContext: { isIdle?: () => boolean } | null = null;
+  function rememberContext(ctx: unknown): void {
+    if (ctx && typeof (ctx as { isIdle?: unknown }).isIdle === "function") {
+      sessionContext = ctx as { isIdle: () => boolean };
+    }
+  }
+  function mainIsIdle(): boolean {
+    try {
+      return sessionContext?.isIdle?.() === true;
+    } catch {
+      return false;
+    }
+  }
+
   async function sendWake(
     owner: SessionGeneration,
     message: string,
@@ -582,7 +609,7 @@ export default function (pi: ExtensionAPI) {
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      await pi.sendUserMessage(content, mainIsIdle() ? undefined : { deliverAs: "followUp" });
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
@@ -1108,10 +1135,12 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
-  pi.on?.("before_agent_start", (event) => {
+  pi.on?.("before_agent_start", (event, ctx) => {
+    rememberContext(ctx);
     consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
   });
-  pi.on?.("message_start", (event) => {
+  pi.on?.("message_start", (event, ctx) => {
+    rememberContext(ctx);
     const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
     if (!message || message.role !== "user") return;
     consumeWake(generation, userMessageText(message.content));
@@ -1124,7 +1153,8 @@ export default function (pi: ExtensionAPI) {
     activateOwnedWatch(owner);
   }
 
-  pi.on?.("session_start", async () => {
+  pi.on?.("session_start", async (_event, ctx) => {
+    rememberContext(ctx);
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
