@@ -1276,7 +1276,8 @@ SH
 #!/usr/bin/env bash
 printf 'host=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 started="watcher: started pid=$$ (beacon fresh) recovery-generation=gen-$$"
-case "$(grep -c '^host=' "$FM_ARM_LOG")" in
+hosts=$(grep -c '^host=' "$FM_ARM_LOG")
+case "$hosts" in
   1)
     printf '%s\n' "$started"
     sleep 1
