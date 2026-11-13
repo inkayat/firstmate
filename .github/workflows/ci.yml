@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, astro_main]
     # labeled lets the full-ci go-ahead start the full suite; see the
     # outside pull request gate below.
     types: [opened, synchronize, reopened, labeled]

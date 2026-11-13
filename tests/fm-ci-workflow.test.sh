@@ -174,8 +174,10 @@ end
 # association, head (head repository), number, run_id, skip_push, skip_macos,
 # needs (success, failure, or cancelled: the needed jobs' results that job
 # conditions and the Full suite verdict read), outcome (how every job that runs
-# concludes, read only by published_checks). A push event clears the PR fields,
-# which GitHub leaves empty there. Each resolver prepends this.
+# concludes, read only by published_checks), branch (the branch a trigger's
+# branches filter matches: a pull request's base, or the pushed branch). A
+# push event clears the PR fields, which GitHub leaves empty there. Each
+# resolver prepends this.
 # shellcheck disable=SC2016  # Ruby text, not shell expansions
 CONTEXT_RUBY='
 def simulated_context(workflow_name, overrides)
@@ -183,7 +185,7 @@ def simulated_context(workflow_name, overrides)
     "event" => "pull_request", "action" => "synchronize", "label" => "",
     "labels" => "", "association" => "NONE", "head" => "contributor/firstmate",
     "number" => "108", "run_id" => "900001", "skip_push" => "", "skip_macos" => "",
-    "needs" => "success", "outcome" => "success",
+    "needs" => "success", "outcome" => "success", "branch" => "main",
   }
   if overrides.any? { |pair| pair == "event=push" }
     o.merge!("action" => "", "association" => "", "head" => "", "number" => "")
@@ -209,17 +211,25 @@ def simulated_context(workflow_name, overrides)
     "needs.status" => o["needs"],
     "needs.*.result" => [o["needs"]],
     "simulated.outcome" => o["outcome"],
+    "simulated.branch" => o["branch"],
   }
 end
 
 # Whether the workflow triggers start a run for this simulated event at all:
-# a pull_request action outside on.pull_request.types (the GitHub default when
-# absent is opened, synchronize, reopened) starts no run and publishes nothing.
-# Psych reads the bare key `on` as true.
+# an event the workflow does not list, a branch outside the branches filter of
+# that event (glob patterns, where * stops at /), or a pull_request action
+# outside on.pull_request.types (the GitHub default when absent is opened,
+# synchronize, reopened) starts no run and publishes nothing. Psych reads the
+# bare key `on` as true.
 def triggered?(doc, context)
-  return true unless context["github.event_name"] == "pull_request"
   triggers = doc[true] || doc["on"]
-  types = triggers.fetch("pull_request", nil).to_h.fetch("types", %w[opened synchronize reopened])
+  event = context["github.event_name"]
+  return false unless triggers.key?(event)
+  filter = triggers.fetch(event).to_h
+  branches = filter["branches"]
+  return false if branches && branches.none? { |pattern| File.fnmatch?(pattern, context["simulated.branch"], File::FNM_PATHNAME) }
+  return true unless event == "pull_request"
+  types = filter.fetch("types", %w[opened synchronize reopened])
   types.include?(context["github.event.action"])
 end
 
@@ -356,6 +366,15 @@ workflow_jobs() {
   ruby -ryaml -e 'puts YAML.load_file(ARGV[0]).fetch("jobs").keys' "$CI_WORKFLOW"
 }
 
+# Print true or false: whether one workflow file's triggers start a run for
+# one simulated event.
+workflow_triggered() {  # <workflow-file> [KEY=VALUE]...
+  ruby -ryaml -e "$EXPRESSION_RUBY" -e "$CONTEXT_RUBY" -e '
+doc = YAML.load_file(ARGV.shift)
+puts triggered?(doc, simulated_context(doc["name"].to_s, ARGV))
+' "$@"
+}
+
 group_of() { printf '%s\n' "$1" | cut -f1; }
 cancel_of() { printf '%s\n' "$1" | cut -f2; }
 
@@ -470,6 +489,39 @@ test_trusted_runs_are_unchanged() {
       || fail "the Full suite verdict must pass for $context when its lanes passed:"$'\n'"$out"
   done
   pass "main pushes, own branches and write-access authors still run every job and pass the verdict"
+}
+
+# This fork integrates through astro_main: a pull request into it starts the
+# same CI run and no-mistakes compliance check as one into main, while pushes
+# still run CI only for main and a pull request into any other branch starts
+# neither workflow.
+test_astro_main_pull_requests_trigger_the_main_checks() {
+  local workflow branch expected actual all
+  for workflow in ci.yml no-mistakes-required.yml; do
+    while read -r branch expected; do
+      actual=$(workflow_triggered "$ROOT/.github/workflows/$workflow" branch="$branch") \
+        || fail "could not resolve $workflow triggers for a pull request into $branch"
+      [ "$actual" = "$expected" ] \
+        || fail "$workflow on a pull request into $branch must resolve $expected, got $actual"
+    done <<'TABLE'
+main          true
+astro_main    true
+feature/other false
+TABLE
+  done
+  while read -r branch expected; do
+    actual=$(workflow_triggered "$CI_WORKFLOW" event=push branch="$branch") \
+      || fail "could not resolve ci.yml triggers for a push to $branch"
+    [ "$actual" = "$expected" ] || fail "ci.yml on a push to $branch must resolve $expected, got $actual"
+  done <<'TABLE'
+main       true
+astro_main false
+TABLE
+  all=$(workflow_jobs | tr '\n' ' ') || fail "could not list ci.yml jobs"
+  actual=$(jobs_running_under branch=astro_main head=kunchenguid/firstmate | tr '\n' ' ') \
+    || fail "could not resolve jobs for an own-branch pull request into astro_main"
+  [ "$actual" = "$all" ] || fail "an own-branch pull request into astro_main must run every job, ran: $actual"
+  pass "pull requests into astro_main start the same CI and compliance checks as main; pushes stay main-only"
 }
 
 # DOP-167: another label neither starts nor cancels a run: no job runs, not
@@ -731,6 +783,7 @@ test_only_the_full_ci_label_joins_the_pr_group
 test_outside_pr_without_label_runs_only_quick_checks
 test_full_ci_label_runs_the_whole_suite
 test_trusted_runs_are_unchanged
+test_astro_main_pull_requests_trigger_the_main_checks
 test_unrelated_label_starts_no_job
 test_late_unrelated_label_run_never_masks_a_full_ci_pass
 test_unrelated_label_never_masks_an_earlier_failure

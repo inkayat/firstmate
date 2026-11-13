@@ -6,6 +6,7 @@ on:
     types: [opened, edited, synchronize, reopened]
     branches:
       - main
+      - astro_main
 
 permissions:
   contents: read
