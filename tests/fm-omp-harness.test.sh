@@ -902,7 +902,7 @@ const { loadPair, arms, until, sleep } = await import(`${process.env.REPO}/omp-p
 const pair = await loadPair(process.env.REPO);
 await pair.start();
 if (existsSync(`${process.env.FM_HOME}/state/.lock`)) throw new Error("fixture invalid: the lock existed before session_start returned");
-if (!(await until(() => arms() > 0))) throw new Error("the initial cycle never armed after this session's startup took the lock");
+if (!(await until(() => arms() > 0))) throw new Error("the initial cycle never armed after startup of this session took the lock");
 await sleep(500);
 if (arms() !== 1) throw new Error(`the initial cycle must arm exactly once, saw ${arms()} launches`);
 const manual = await pair.arm();
@@ -934,11 +934,11 @@ if (!(await until(() => pair.sent.length > 0, 8000))) throw new Error("the queue
 await sleep(500);
 if (pair.sent.length !== 1) throw new Error(`expected one follow-up, saw ${JSON.stringify(pair.sent)}`);
 if (!pair.sent[0].m.includes(`FIRSTMATE WATCHER WAKE: check: captain inbox note ${id} - screenshot answer from the Inbox`)) throw new Error(`unexpected wake: ${pair.sent[0].m}`);
-// omp's deliverAs "followUp" only queues behind the current run, so an idle
+// The omp deliverAs "followUp" only queues behind the current run, so an idle
 // main (here with zero prior turns) would never start a turn. The idle wake
 // must go out without deliverAs, which is what makes omp prompt the model.
-if (pair.sent[0].o?.deliverAs !== undefined) throw new Error(`an idle main's wake must start a turn, not queue as ${JSON.stringify(pair.sent[0].o)}`);
-if (!readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8").includes(`inbox:${id}`)) throw new Error("delivery must leave the durable wake row for main's drain");
+if (pair.sent[0].o?.deliverAs !== undefined) throw new Error(`the wake of an idle main must start a turn, not queue as ${JSON.stringify(pair.sent[0].o)}`);
+if (!readFileSync(`${process.env.FM_HOME}/state/.wake-queue`, "utf8").includes(`inbox:${id}`)) throw new Error("delivery must leave the durable wake row for the drain by main");
 await pair.consume(pair.sent[0].m);
 // A main that is streaming keeps the queued follow-up: the wake must not
 // interrupt the running turn or start a second one.
@@ -951,7 +951,7 @@ if (!(await until(() => pair.sent.length > 1, 8000))) throw new Error("the note 
 await sleep(500);
 if (pair.sent.length !== 2) throw new Error(`expected two wakes in total, saw ${JSON.stringify(pair.sent)}`);
 if (!pair.sent[1].m.includes(`check: captain inbox note ${busyId} - second answer while main works`)) throw new Error(`unexpected busy wake: ${pair.sent[1].m}`);
-if (pair.sent[1].o?.deliverAs !== "followUp") throw new Error(`a busy main's wake must stay a queued follow-up, saw ${JSON.stringify(pair.sent[1].o)}`);
+if (pair.sent[1].o?.deliverAs !== "followUp") throw new Error(`the wake of a busy main must stay a queued follow-up, saw ${JSON.stringify(pair.sent[1].o)}`);
 await pair.consume(pair.sent[1].m);
 await pair.shutdown();
 if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
