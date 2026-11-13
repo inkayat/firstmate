@@ -46,6 +46,14 @@
 // handoff carries actionable closes that were still pending delivery; its
 // durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
+// A first process start has no lock yet at session_start: the turn-end guard's
+// startup child takes it moments later and the guard announces that child
+// settling (firstmate:omp-session-start-settled, owned by
+// .omp/extensions/fm-primary-turnend-guard.ts). The live generation arms its
+// initial cycle there, once, when this session owns the lock and the
+// generation has not launched an arm yet, so the required fm_watch_arm_omp call
+// is then an ownership no-op and an arm the model already started (or whose
+// bounded retries already handed repair to main) is never relaunched.
 //
 // Delivery versus consumption (stated once here):
 // A main follow-up is delivered once omp accepts it (sendUserMessage returns).
@@ -78,6 +86,7 @@ type ExtensionAPI = {
   sendUserMessage: (content: string, options?: { deliverAs?: string }) => unknown;
   registerCommand?: (name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> | void }) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
+  events?: { on?: (channel: string, handler: (data: unknown) => unknown) => unknown };
 };
 
 type ArmResult = {
@@ -160,6 +169,7 @@ const hostReadyTimeoutMs = Math.max(armReadyTimeoutMs, 30000);
 const armRetireTimeoutMs = positiveInteger("FM_WATCH_ARM_RETIRE_TIMEOUT_MS", 1000);
 const repairOnlyHint = "call fm_watch_arm_omp again only after a later notification says the cycle is missing, failed, or unhealthy";
 const shuttingDownMessage = "watcher: not armed - omp session is shutting down";
+const sessionstartSettledEvent = "firstmate:omp-session-start-settled";
 
 let nextGenerationId = 0;
 let nextHandoffId = 0;
@@ -1107,12 +1117,21 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(message.content));
   });
 
+  // The first cycle of a generation: never before this session owns the lock,
+  // and never a second time once the generation launched any arm.
+  function armInitialCycle(owner: SessionGeneration): void {
+    if (!generationIsLive(owner) || owner.seq > 0 || lockOwnership() !== "owned") return;
+    activateOwnedWatch(owner);
+  }
+
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
-    if (lockOwnership() !== "owned") return;
-    activateOwnedWatch(generation);
+    armInitialCycle(generation);
+  });
+  pi.events?.on?.(sessionstartSettledEvent, () => {
+    armInitialCycle(generation);
   });
   pi.on?.("session_shutdown", async () => {
     // omp carries no shutdown reason (verified: `reason` is undefined), so the

@@ -26,6 +26,13 @@
 // before_agent_start returning { message } was verified to reach model context
 // on omp 18.1.11 (the model quoted an injected marker back), so omp qualifies
 // for the Run tier.
+// That session_start child is also what takes the session lock on a first
+// process start, moments after every extension's session_start returned. When
+// the live generation's child settles, this extension emits
+// firstmate:omp-session-start-settled (no payload) on omp's shared extension
+// event bus; .omp/extensions/fm-primary-omp-watch.ts arms its initial watcher
+// cycle there when this session then owns the lock. A cancelled or replaced
+// generation emits nothing.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -44,6 +51,7 @@ import {
 type ExtensionAPI = {
   on?: (event: string, handler: (event: any, ctx: any) => unknown) => void;
   sendMessage?: (message: unknown) => void;
+  events?: { emit?: (channel: string, data?: unknown) => void };
 };
 
 type LockOwnership = "owned" | "missing" | "other";
@@ -120,6 +128,7 @@ const sessionstartManualFallback =
   "Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions.";
 const sessionstartIneligibleExit = 3;
 const sessionstartRetireTimeoutMs = 1000;
+const sessionstartSettledEvent = "firstmate:omp-session-start-settled";
 
 // One active generation owns native startup from child launch through context
 // claim. Replacement activates first, serially retires every predecessor, and
@@ -544,7 +553,11 @@ export default function (pi: ExtensionAPI) {
       : "clear";
     markLoaded();
     registerSessionstartExitListener();
-    sessionstartGeneration = createSessionstartGeneration(source, sessionIdFromContext(ctx));
+    const generation = createSessionstartGeneration(source, sessionIdFromContext(ctx));
+    sessionstartGeneration = generation;
+    void generation.result.then(() => {
+      if (sessionstartGenerationIsLive(generation)) pi.events?.emit?.(sessionstartSettledEvent);
+    });
   });
 
   pi.on?.("before_agent_start", async (_event, ctx) => {
